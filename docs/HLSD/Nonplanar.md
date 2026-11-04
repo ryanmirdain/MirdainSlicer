@@ -72,8 +72,11 @@ model, not a guarantee about molten filament or a perfectly smooth finish.
 Normal thickness and transverse physical width are stored separately. On a
 local patch, transverse width is `projected_width * sqrt(1 + transverse_slope^2)`.
 Flow integrates the actual bilinear gap over the full swept rectangular strip,
-using exact polygon area/first/mixed moments in each crossed grid cell. It is
-derived from that deposited volume and the final 3D path length. It is
+using exact polygon area/first/mixed moments in each crossed grid cell. Previously
+covered footprints on the same band are subtracted before integration, so shared
+corners, wall intersections and skin overlaps receive volume once. Flat-ended
+infill strips overlap the innermost wall to avoid gaps at their endpoints. Flow is
+derived from the newly deposited volume and the final 3D path length. It is
 never copied from a planar path. Grid seams split paths before adaptive
 segmentation. Chord error, 3D segment length and relative thickness variation
 all control segmentation. No automatic normalization, roof pinning or layer
@@ -96,7 +99,11 @@ Unsupported geometric overhangs and floating islands fail explicitly.
 `Nonplanar/Print` adapts placed Print instances and ordinary printer/process/
 filament configuration to the native engine. GCodeWriter emits final XYZ/E and
 handles retraction and extrusion modes. Every inter-path travel lifts above the
-global printed height envelope before XY motion and descent. Configured vertical
+global printed height envelope, bounded across the complete bead width rather
+than just its centerline, before XY motion and descent. Fully covered zero-volume
+segments use the same clearance travel instead of dragging across the surface.
+Each object's first printable band must reach the bed and exceed the extrusion
+coordinate resolution. Configured vertical
 XYZ/E axis speeds and filament volumetric flow cap deposition speed. Clearance uses
 the minimum configured nozzle/rod/lid height conservatively against all already printed
 geometry. Failure to find safe Z travel is an error.
@@ -150,7 +157,9 @@ raise specific errors only in nonplanar mode.
 
 Also select `wall_generator=classic` and rectilinear top, bottom and internal
 solid patterns. Disable infill combination, machine exclusion regions and
-per-layer/timelapse custom scripts. `z_offset` must be zero. Start/end and
+per-layer/timelapse custom scripts. The printable area must be convex so straight
+clearance travels between accepted paths stay within its XY limits.
+`z_offset` must be zero. Start/end and
 filament start/end templates use Orca's placeholder parser; unsupported dynamic
 placeholders raise its normal errors instead of being ignored. Templates must
 leave a homed fixed-nozzle Cartesian machine; generated moves explicitly restore

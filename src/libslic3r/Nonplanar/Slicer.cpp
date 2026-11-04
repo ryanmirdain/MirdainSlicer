@@ -49,6 +49,22 @@ std::vector<XYZ> clip_axis(const std::vector<XYZ> &polygon, int axis, double val
     return out;
 }
 
+double band_volume(const std::vector<XYZ> &polygon, const Patch &top, const Patch &bottom)
+{
+    const XY origin = xy(polygon.front());
+    const XY gt = top.gradient(origin), gb = bottom.gradient(origin);
+    double area = 0., mx = 0., my = 0., mxy = 0.;
+    for (size_t n = 0; n < polygon.size(); ++n) {
+        const XY p {polygon[n].x-origin.x,polygon[n].y-origin.y};
+        const XYZ next = polygon[(n+1)%polygon.size()];
+        const XY q {next.x-origin.x,next.y-origin.y};
+        const double cross = p.x*q.y-q.x*p.y;
+        area += cross*.5; mx += (p.x+q.x)*cross/6.; my += (p.y+q.y)*cross/6.;
+        mxy += (2.*p.x*p.y+p.x*q.y+q.x*p.y+2.*q.x*q.y)*cross/24.;
+    }
+    return (top.value(origin)-bottom.value(origin))*area+(gt.x-gb.x)*mx+(gt.y-gb.y)*my+(top.axy-bottom.axy)*mxy;
+}
+
 class Intersection {
 public:
     Intersection(const LayerStack &s, const std::function<void()> &c) : stack(s), cancel(c) {}
@@ -171,7 +187,7 @@ private:
 
 class Planner {
 public:
-    Planner(const LayerStack &s, const Settings &p) : stack(s), settings(p) {}
+    Planner(const LayerStack &s, const Settings &p) : stack(s), settings(p), deposited(s.layers.size()) {}
 
     Path path(const Path64 &points, bool closed, size_t k, Role role)
     {
@@ -202,12 +218,44 @@ public:
 private:
     const LayerStack &stack;
     const Settings &settings;
+    std::vector<Paths64> deposited;
 
-    // Integrate the actual bilinear band over the complete projected rectangular
-    // swept cross-section, splitting the strip at cell boundaries. Polygon
-    // moments integrate 1, x, y and xy exactly; this includes transverse changes
-    // in thickness which a centerline-only length correction would miss.
-    double strip_volume(XY a, XY b, size_t k, double &preview_error) const
+    double account_volume(XY a, XY b, size_t k)
+    {
+        const double length = std::hypot(b.x-a.x,b.y-a.y), half = settings.width*.5;
+        const XY normal {-(b.y-a.y)/length*half,(b.x-a.x)/length*half};
+        Path64 strip {point({a.x+normal.x,a.y+normal.y}),point({a.x-normal.x,a.y-normal.y}),
+                      point({b.x-normal.x,b.y-normal.y}),point({b.x+normal.x,b.y+normal.y})};
+        const Paths64 fresh = difference({strip},deposited[k]);
+        deposited[k] = Union(deposited[k],Paths64{strip},FillRule::NonZero);
+        if (fresh.empty() || Area(fresh) <= 1.) return 0.; // below the integer chart's area resolution
+        // Attribute shared corner/seam/neighbor-wall volume only once. This
+        // keeps the union of modeled beads and the commanded volume consistent.
+        const Surface &below = k ? stack.layers[k-1] : stack.bed;
+        const auto bounds = GetBounds(fresh);
+        const auto [i0,j0] = stack.cell(real({bounds.left,bounds.top}));
+        const auto [i1,j1] = stack.cell(real({bounds.right,bounds.bottom}));
+        double volume = 0.;
+        for (size_t j = j0; j <= j1; ++j) for (size_t i = i0; i <= i1; ++i) {
+            const Path64 cell {point({stack.x[i],stack.y[j]}),point({stack.x[i+1],stack.y[j]}),
+                               point({stack.x[i+1],stack.y[j+1]}),point({stack.x[i],stack.y[j+1]})};
+            const auto clipped = intersect(fresh,{cell});
+            const Patch top = stack.patch(stack.layers[k],i,j), bottom = stack.patch(below,i,j);
+            for (const auto &polygon : clipped) {
+                std::vector<XYZ> vertices;
+                vertices.reserve(polygon.size());
+                for (Point64 p : polygon) { const XY q = real(p); vertices.push_back({q.x,q.y,0.}); }
+                // Hole paths retain negative winding and subtract their volume.
+                volume += band_volume(vertices,top,bottom);
+            }
+        }
+        if (volume < 0.) invalid(_u8L("Bead-volume integration lost numerical precision"));
+        return volume;
+    }
+
+    // Bound the complete projected strip, including transverse curvature and
+    // its maximum deposited top. Flow is accounted separately after refinement.
+    void bound_strip(XY a, XY b, size_t k, double &preview_error, double &max_top_z) const
     {
         const double ds = std::hypot(b.x-a.x,b.y-a.y), half = settings.width*.5;
         const XY normal {-(b.y-a.y)/ds*half,(b.x-a.x)/ds*half};
@@ -217,7 +265,6 @@ private:
         for (XYZ p : strip) { xmin = std::min(xmin,p.x); xmax = std::max(xmax,p.x); ymin = std::min(ymin,p.y); ymax = std::max(ymax,p.y); }
         const auto [i0,j0] = stack.cell({xmin,ymin});
         const auto [i1,j1] = stack.cell({xmax,ymax});
-        double volume = 0.;
         const Surface &below = k ? stack.layers[k-1] : stack.bed;
         const XY mid {(a.x+b.x)*.5,(a.y+b.y)*.5};
         const XY grad = stack.gradient(stack.layers[k],mid);
@@ -228,6 +275,7 @@ private:
         const XY slope {tangent.x*(zb-za)/ds+right.x*cross_slope,
                         tangent.y*(zb-za)/ds+right.y*cross_slope};
         preview_error = 0.;
+        max_top_z = -std::numeric_limits<double>::infinity();
         for (size_t j = j0; j <= j1; ++j) for (size_t i = i0; i <= i1; ++i) {
             auto polygon = clip_axis(strip,0,stack.x[i],true); polygon = clip_axis(polygon,0,stack.x[i+1],false);
             polygon = clip_axis(polygon,1,stack.y[j],true); polygon = clip_axis(polygon,1,stack.y[j+1],false);
@@ -247,21 +295,15 @@ private:
                         const double f0 = residual(tri[v]), f1 = residual(tri[(v+1)%3]);
                         const double control = 2.*residual(mix(tri[v],tri[(v+1)%3],.5))-.5*(f0+f1);
                         preview_error = std::max({preview_error,std::abs(f0),std::abs(control)});
+                        if (side == 0) {
+                            const double z0 = top.value(xy(tri[v])), z1 = top.value(xy(tri[(v+1)%3]));
+                            const double bound = 2.*top.value(xy(mix(tri[v],tri[(v+1)%3],.5)))-.5*(z0+z1);
+                            max_top_z = std::max({max_top_z,z0,bound});
+                        }
                     }
                 }
             }
-            double area = 0., mx = 0., my = 0., mxy = 0.;
-            for (size_t n = 0; n < polygon.size(); ++n) {
-                const XY p {polygon[n].x-top.x,polygon[n].y-top.y};
-                const XYZ next = polygon[(n+1)%polygon.size()];
-                const XY q {next.x-top.x,next.y-top.y};
-                const double cross = p.x*q.y-q.x*p.y;
-                area += cross*.5; mx += (p.x+q.x)*cross/6.; my += (p.y+q.y)*cross/6.;
-                mxy += (2.*p.x*p.y+p.x*q.y+q.x*p.y+2.*q.x*q.y)*cross/24.;
-            }
-            volume += std::abs((top.c-bottom.c)*area+(top.ax-bottom.ax)*mx+(top.ay-bottom.ay)*my+(top.axy-bottom.axy)*mxy);
         }
-        return volume;
     }
 
     void segment(Path &out, XY a, XY b, size_t k, unsigned depth)
@@ -293,13 +335,14 @@ private:
         }
         const XY grad = stack.gradient(stack.layers[k],mid);
         const double cross_slope = (-grad.x*(b.y-a.y)+grad.y*(b.x-a.x))/ds;
-        double preview_error;
-        const double volume = strip_volume(a,b,k,preview_error);
+        double preview_error, max_top_z;
+        bound_strip(a,b,k,preview_error,max_top_z);
         if (preview_error > stack.limits.geometry_tolerance*.5) {
             if (depth >= 24) invalid(_u8L("line width cannot represent transverse surface curvature/thickness within geometry tolerance; use a narrower line or a larger tolerance"));
             segment(out,a,mid,k,depth+1); segment(out,mid,b,k,depth+1); return;
         }
-        out.segments.push_back({q,volume,gap,normal,settings.width*std::sqrt(1.+cross_slope*cross_slope),-cross_slope});
+        const double volume = account_volume(a,b,k);
+        out.segments.push_back({q,volume,gap,normal,settings.width*std::sqrt(1.+cross_slope*cross_slope),-cross_slope,max_top_z});
     }
 };
 
@@ -335,6 +378,7 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
     for (const Object &object : objects) for (const Triangle &t : object.triangles) for (XYZ p : t.vertices) {
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) invalid(_u8L("model contains nonfinite coordinates"));
         if (!stack.covers(xy(p))) invalid(_u8L("shared grid does not cover the placed model footprint"));
+        if (p.z < -tol) invalid(_u8L("model extends below machine Z zero"));
         if (p.z < stack.value(stack.bed,xy(p))-tol) invalid(_u8L("model extends below the supplied bed"));
         if (p.z > settings.max_z+tol) invalid(_u8L("model exceeds machine Z height"));
         if (p.z > stack.value(stack.layers.back(),xy(p))+tol) invalid(_u8L("layer stack does not cover the complete model height"));
@@ -344,6 +388,8 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
     Planner planner(stack,settings);
     for (const Object &object : objects) {
         Intersection(stack,cancel).require_coverage(object);
+        bool object_has_paths = false;
+        double object_volume = 0.;
         std::vector<Paths64> bands;
         for (size_t k = 0; k < stack.layers.size(); ++k) {
             cancel();
@@ -355,8 +401,12 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
         for (size_t k = 0; k < bands.size(); ++k) {
             cancel();
             Layer &layer = output[k];
+            const size_t first_object_path = layer.paths.size();
             const double margin = settings.width*.5+tol;
             Paths64 safe = inset(bands[k],margin,tol);
+            if (!safe.empty() && !object_has_paths && k != 0)
+                invalid(_u8L("An object's first printable bead is above the bed; thin contacts or floating starts need unsupported support strategies"));
+            object_has_paths = object_has_paths || !safe.empty();
             if (k > 0 && !difference(safe,bands[k-1]).empty())
                 invalid(_u8L("unsupported overhang or floating island requires bridging/support, which is unavailable in nonplanar mode"));
             for (int wall = 0; wall < settings.walls; ++wall) {
@@ -364,7 +414,7 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
                 for (const auto &p : contours) if (p.size() >= 3)
                     layer.paths.push_back(planner.path(p,true,k,wall ? Role::InnerWall : Role::OuterWall));
             }
-            Paths64 interior = inset(safe,settings.walls*settings.width,tol);
+            Paths64 interior = inset(safe,(settings.walls-.5)*settings.width,tol);
             // Skin propagation follows material presence on neighboring supplied
             // bands, independently for each object and all its islands/holes.
             Paths64 top = interior, bottom = interior;
@@ -381,14 +431,30 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
             const Paths64 bottom_only = difference(bottom,top), solid = Union(top,bottom,FillRule::NonZero);
             const Paths64 sparse = difference(interior,solid);
             auto fill = [&](const Paths64 &region, double spacing, Role role) {
-                for (const auto &p : infill(region,stack,spacing,settings.infill_angle+90.*(k%2))) if (p.size() >= 2)
+                // Flat-ended strip beads must overlap the innermost wall and
+                // the skin partition boundary. Dilation includes every grid
+                // line whose width covers the target; the safe band still
+                // protects original holes and the entire bead footprint.
+                const auto expanded = InflatePaths(region,settings.width*.5*scale,Clipper2Lib::JoinType::Round,
+                                                   Clipper2Lib::EndType::Polygon,2.,tol*scale/8.);
+                const auto centers = intersect(expanded,safe);
+                for (const auto &p : infill(centers,stack,spacing,settings.infill_angle+90.*(k%2))) if (p.size() >= 2)
                     layer.paths.push_back(planner.path(p,false,k,role));
             };
             fill(top,settings.width,Role::TopSkin);
             fill(bottom_only,settings.width,Role::BottomSkin);
             if (settings.density > 0) fill(sparse,settings.width/settings.density,
                                           settings.density == 1. ? Role::SolidInfill : Role::SparseInfill);
+            double layer_volume = 0.;
+            for (size_t p = first_object_path; p < layer.paths.size(); ++p)
+                for (const auto &segment : layer.paths[p].segments) layer_volume += segment.volume;
+            if (k == 0 && object_has_paths && layer_volume <= settings.min_deposited_volume)
+                invalid(_u8L("An object's first-layer volume is below native G-code extrusion resolution"));
+            object_volume += layer_volume;
         }
+        if (!object_has_paths) invalid(_u8L("No printable bead fits one of the supplied objects"));
+        if (object_volume <= settings.min_deposited_volume)
+            invalid(_u8L("One object's deposited volume is below native G-code extrusion resolution"));
     }
     if (std::none_of(output.begin(),output.end(),[](const Layer &l) { return !l.paths.empty(); }))
         invalid(_u8L("no printable bead fits in the supplied material bands"));
@@ -397,7 +463,10 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
         auto add = [&](XYZ p) { layer.min_z = std::min(layer.min_z,p.z); layer.max_z = std::max(layer.max_z,p.z); };
         for (const auto &path : layer.paths) {
             add(path.start);
-            for (const auto &segment : path.segments) add(segment.end);
+            for (const auto &segment : path.segments) {
+                add(segment.end);
+                layer.max_z = std::max(layer.max_z,segment.max_top_z);
+            }
         }
         if (layer.min_z < 0. || layer.max_z > settings.max_z) invalid(_u8L("generated path exceeds machine Z limits"));
     }

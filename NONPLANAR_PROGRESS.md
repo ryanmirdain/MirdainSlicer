@@ -2,6 +2,7 @@
 
 User-selected repository: https://github.com/ryanmirdain/MirdainSlicer
 Working branch: `main`; initial checkout: `79985162e4c83a0749dbebeb77dff562aeca45da`.
+This provided checkout identifies itself as `2.5.0-dev` in `version.inc`.
 The user's latest instruction selects this existing Orca version. It supersedes
 the pasted request to start a fresh checkout at the release tag.
 Upstream `git ls-remote` independently verified on 2026-11-04:
@@ -9,7 +10,11 @@ Upstream `git ls-remote` independently verified on 2026-11-04:
 The local checkout has not been reset/rebased, and no branch was created.
 Implementation commit: `4f44528708` (native geometry, planning, CLI/GUI,
 metadata, preview and dependency build option). Follow-up source review changes
-are being compiled before the final integration commit.
+were committed as `231eac0286` (input validation, translations, normal-spacing
+planning and preview transitions). The subsequent change accounts for shared
+deposited footprints once, bounds full bead heights for clearance, connects
+flat-ended infill to walls, supplies first/last-path template values, rejects
+floating first beads, and fixes the CLI's explicit formatting include.
 
 No tests may be written or run. Only source review, compiling and packaging are
 authorized. Compilation establishes type/link compatibility; it does not prove
@@ -44,7 +49,7 @@ was built by the fork's own `build_linux.sh`. The dependency/full/package build
 command with the CPython workload explicitly disabled is:
 
 ```sh
-./build_linux.sh -g -dsi -j 6 -J 2 -r -- -DSLIC3R_CAD=OFF -DBUILD_TESTS=OFF -DORCA_PYTHON_PGO=OFF
+./build_linux.sh -g -dsi -j 6 -J 1 -r -- -DSLIC3R_CAD=OFF -DBUILD_TESTS=OFF -DORCA_PYTHON_PGO=OFF
 ```
 
 For an Ubuntu 24.04 host, install build prerequisites using the fork's normal
@@ -52,7 +57,7 @@ script, then build dependencies and the application/package without `-g`:
 
 ```sh
 ./build_linux.sh -u
-./build_linux.sh -dsi -j 6 -J 2 -r -- -DSLIC3R_CAD=OFF -DBUILD_TESTS=OFF -DORCA_PYTHON_PGO=OFF
+./build_linux.sh -dsi -j 6 -J 1 -r -- -DSLIC3R_CAD=OFF -DBUILD_TESTS=OFF -DORCA_PYTHON_PGO=OFF
 ```
 
 `-t` must never be supplied. These commands select the host architecture; use
@@ -72,7 +77,7 @@ docker run --rm --name mirdain-orca-native-build --user 501:20 \
   --mount type=bind,src="$PWD",dst=/__w/OrcaSlicer/OrcaSlicer \
   -w /__w/OrcaSlicer/OrcaSlicer \
   orcaslicer-linux-builder:ubuntu-24.04--cmake-4.3.0--4fc88e178d94 \
-  cmake --build build --config Release --parallel 2
+  cmake --build build --config Release --parallel 1
 ```
 
 Host logs: `/tmp/MirdainSlicer-native-build.log` (dependency/configuration build)
@@ -84,10 +89,11 @@ Source edits after that compile still need the final incremental build.
 ## In progress / not yet established
 
 The core slicing library linked successfully. The GUI/application and package
-build is still running. GCC's parallel
-Release build exhausted the Docker VM's approximately 8 GB memory in an upstream
-CGAL translation unit. Resume with lower application build concurrency (the
-successful dependency builds can be reused). This document must
+build is still running. GCC's parallel Release build exhausted the Docker VM's
+approximately 8 GB memory in upstream CGAL and large GUI translation units.
+The remaining large GUI units are being compiled serially. Resume with serial
+application build concurrency (the successful dependency builds can be reused).
+This document must
 be updated with its actual result and artifact paths before delivery. Native
 emission/startup templates, original band/flow conventions and preview were
 source-reviewed; the shader stages compiled and linked. Final source edits,

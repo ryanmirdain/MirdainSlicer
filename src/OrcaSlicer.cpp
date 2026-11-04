@@ -24,6 +24,7 @@
 #include <vector>
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/Nonplanar/Print.hpp"
+#include "libslic3r/format.hpp"
 #include <boost/date_time/posix_time/posix_time_duration.hpp>
 #include <cerrno>
 #include <utility>

@@ -14,7 +14,7 @@ enum class Role { OuterWall, InnerWall, SparseInfill, SolidInfill, TopSkin, Bott
 // Dimensions describe the actual swept band, not a planar bead relocated in Z.
 struct Segment {
     XYZ end;
-    double volume, vertical_height, normal_height, physical_width, cross_slope;
+    double volume, vertical_height, normal_height, physical_width, cross_slope, max_top_z;
 };
 struct Path {
     XYZ start;
@@ -31,6 +31,7 @@ struct Settings {
     double infill_angle = 0.;
     double nozzle_diameter = 0.4, max_z = 250.;
     double min_normal_height = 0., max_normal_height = 0.;
+    double min_deposited_volume = 0.;
     double clearance_radius = 0., clearance_height = 0.;
 };
 

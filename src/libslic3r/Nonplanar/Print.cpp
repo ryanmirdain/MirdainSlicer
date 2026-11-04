@@ -197,6 +197,10 @@ std::shared_ptr<Job> prepare(Print &print, const std::string &text)
     s.nozzle_diameter = first(config,"nozzle_diameter",.4);
     s.min_normal_height = first(config,"min_layer_height",0.);
     s.max_normal_height = first(config,"max_layer_height",0.);
+    const double filament_diameter = first(config,"filament_diameter",1.75), flow_ratio = first(config,"filament_flow_ratio",1.);
+    if (!std::isfinite(filament_diameter) || !std::isfinite(flow_ratio) || filament_diameter <= 0. || flow_ratio <= 0.)
+        invalid(_u8L("Filament diameter and flow ratio must be positive and finite"));
+    s.min_deposited_volume = .25*std::acos(-1.)*filament_diameter*filament_diameter*1e-6/flow_ratio;
     s.width = config.get_abs_value("line_width",s.nozzle_diameter);
     if (s.width == 0.) s.width = s.nozzle_diameter*1.125;
     // All roles use one explicit projected width. Role-specific widths would
@@ -219,6 +223,8 @@ std::shared_ptr<Job> prepare(Print &print, const std::string &text)
     std::vector<Object> objects;
     const Vec3d origin = print.get_plate_origin();
     Polygon bed_polygon = Polygon::new_scale(config.option<ConfigOptionPoints>("printable_area")->values);
+    if (!polygon_is_convex(bed_polygon))
+        invalid(_u8L("nonplanar travel currently requires a convex printable area"));
     for (const auto *po : print.objects()) {
         const auto *mo = po->model_object();
         for (const auto &key : mo->config.get().keys())
@@ -266,13 +272,34 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
     parser.set("initial_extruder",0);
     parser.set("current_extruder",0);
     parser.set("total_layer_count",int(job.layers.size()));
+    size_t last_printed = 0;
+    const Path *finishing_path = nullptr;
+    double max_printed_z = 0.;
+    for (size_t k = 0; k < job.layers.size(); ++k)
+        for (const Path &path : job.layers[k].paths)
+            if (std::any_of(path.segments.begin(),path.segments.end(),[](const Segment &s) { return s.volume > 0.; })) {
+                last_printed = k; finishing_path = &path;
+                max_printed_z = std::max(max_printed_z,job.layers[k].max_z);
+            }
     parser.set("layer_num",0);
     parser.set("layer_z",job.layers.front().max_z);
-    parser.set("max_layer_z",job.layers.back().max_z);
-    parser.set("max_print_height",job.layers.back().max_z);
+    parser.set("max_layer_z",max_printed_z);
+    parser.set("max_print_z",std::ceil(max_printed_z));
+    parser.set("max_print_height",job.settings.max_z);
     parser.set("z_offset",0.);
     parser.set("model_name",print.get_model_name());
     parser.set("plate_number",print.get_plate_number_formatted());
+    BoundingBoxf first_layer_box;
+    for (const auto &path : job.layers.front().paths) {
+        first_layer_box.merge(Vec2d(path.start.x,path.start.y));
+        for (const auto &segment : path.segments) first_layer_box.merge(Vec2d(segment.end.x,segment.end.y));
+    }
+    first_layer_box.offset(job.settings.width*.5);
+    const Vec2d size = first_layer_box.size(), center = first_layer_box.center();
+    parser.set("first_layer_print_min",new ConfigOptionFloats{first_layer_box.min.x(),first_layer_box.min.y()});
+    parser.set("first_layer_print_max",new ConfigOptionFloats{first_layer_box.max.x(),first_layer_box.max.y()});
+    parser.set("first_layer_print_size",new ConfigOptionFloats{size.x(),size.y()});
+    parser.set("first_layer_center_no_wipe_tower",new ConfigOptionFloats{center.x(),center.y()});
     const BedType bed_type = config.opt_enum<BedType>("curr_bed_type");
     const auto *initial_bed = config.option<ConfigOptionInts>(get_bed_temp_1st_layer_key(bed_type));
     const auto *bed = config.option<ConfigOptionInts>(get_bed_temp_key(bed_type));
@@ -288,8 +315,8 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
     const auto &filament_start_template = config.option<ConfigOptionStrings>("filament_start_gcode")->values.front();
     const auto &filament_end_template = config.option<ConfigOptionStrings>("filament_end_gcode")->values.front();
     const std::string filament_start = parser.process(filament_start_template,0,nullptr,&context);
-    parser.set("layer_num",int(job.layers.size())-1);
-    parser.set("layer_z",job.layers.back().max_z);
+    parser.set("layer_num",int(last_printed));
+    parser.set("layer_z",finishing_path->segments.back().end.z);
     const std::string shutdown = parser.process(config.opt_string("machine_end_gcode"),0,nullptr,&context);
     const std::string filament_end = parser.process(filament_end_template,0,nullptr,&context);
     const double diameter = first(config,"filament_diameter",1.75);
@@ -342,6 +369,16 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
         << filament_start << '\n' << writer.preamble() << writer.reset_e(true);
     double printed_max = job.stack.bounds(job.stack.bed).second;
     double volume = 0.;
+    auto clear_travel = [&](const Vec3d &target) {
+        const double safe_z = std::max(printed_max,target.z()) + std::max(1.,job.stack.limits.max_gap)+tol;
+        if (safe_z > job.settings.max_z) invalid(_u8L("collision-free travel exceeds machine Z height"));
+        if (target.z()+job.settings.clearance_height <= printed_max+tol)
+            invalid(_u8L("toolhead clearance cannot reach this path below already printed geometry"));
+        out << writer.retract() << writer.set_speed(xy_travel*60.)
+            << writer.travel_to_z(safe_z,"nonplanar clearance",true)
+            << writer.travel_to_xyz({target.x(),target.y(),safe_z},"nonplanar travel",true)
+            << writer.travel_to_xyz(target,"nonplanar approach",true) << writer.unretract();
+    };
     for (size_t k = 0; k < job.layers.size(); ++k) {
         if (print.canceled()) throw CanceledException();
         const Layer &layer = job.layers[k];
@@ -351,7 +388,7 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
         for (const auto &path : layer.paths) {
             Vec3d previous = vec(path.start);
             for (const auto &segment : path.segments) {
-                seconds += (vec(segment.end)-previous).norm()/segment_feed(path,segment,previous,k);
+                if (segment.volume > 0.) seconds += (vec(segment.end)-previous).norm()/segment_feed(path,segment,previous,k);
                 previous = vec(segment.end);
             }
         }
@@ -370,21 +407,16 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
             fan *= double(int(k+1)-off_layers)/(full_layer-off_layers);
         out << writer.set_fan(unsigned(std::lround(fan)));
         for (const auto &path_data : layer.paths) {
+            if (std::none_of(path_data.segments.begin(),path_data.segments.end(),[](const Segment &s) { return s.volume > 0.; })) continue;
             const Vec3d start = vec(path_data.start);
-            const double safe_z = std::max(printed_max,start.z()) + std::max(1.,job.stack.limits.max_gap)+tol;
-            if (safe_z > job.settings.max_z) invalid(_u8L("collision-free travel exceeds machine Z height"));
             // The available toolhead profile is a radius and a bottom clearance
             // height. Conservatively clear the whole printed height envelope.
-            if (start.z()+job.settings.clearance_height <= printed_max+tol)
-                invalid(_u8L("toolhead clearance cannot reach this path below already printed geometry"));
-            out << writer.retract() << writer.set_speed(xy_travel*60.);
-            out << writer.travel_to_z(safe_z,"nonplanar clearance",true);
-            out << writer.travel_to_xyz({start.x(),start.y(),safe_z},"nonplanar travel",true);
-            out << writer.travel_to_xyz(start,"nonplanar approach",true) << writer.unretract();
+            clear_travel(start);
             out << "; FEATURE: " << role_name(path_data.role) << '\n';
             Vec3d previous = start;
             for (const Segment &segment : path_data.segments) {
                 const Vec3d end = vec(segment.end);
+                if (segment.volume == 0.) { clear_travel(end); previous = end; continue; }
                 const double maximum_feed = segment_feed(path_data,segment,previous,k);
                 const double feed = std::min(maximum_feed,std::max(first(config,"slow_down_min_speed",0.),maximum_feed*cooling_scale));
                 if (end.z()+job.settings.clearance_height <= printed_max+tol)
@@ -394,7 +426,7 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
                     << "\n;NONPLANAR_BAND:" << job.settings.width << ',' << segment.vertical_height << ','
                     << segment.normal_height << ',' << segment.cross_slope << '\n';
                 out << writer.set_speed(feed*60.) << writer.extrude_to_xyz(end,segment.volume*ratio/filament_area);
-                printed_max = std::max(printed_max,end.z()); volume += segment.volume*ratio;
+                printed_max = std::max(printed_max,segment.max_top_z); volume += segment.volume*ratio;
                 previous = end;
             }
         }
