@@ -14640,7 +14640,7 @@ PlateBBoxData Plater::priv::generate_first_layer_bbox()
     auto curr_plate = this->partplate_list.get_curr_plate();
     auto curr_plate_seq = curr_plate->get_real_print_seq();
     bboxdata.is_seq_print = (curr_plate_seq == PrintSequence::ByObject);
-    bboxdata.first_extruder = print->get_tool_ordering().first_extruder();
+    bboxdata.first_extruder = print->nonplanar() ? 0 : print->get_tool_ordering().first_extruder();
     bboxdata.bed_type       = bed_type_to_gcode_string(print->config().curr_bed_type.value);
     bboxdata.first_layer_time = partplate_list.get_curr_plate()->get_slice_result()->initial_layer_time;
     // get nozzle diameter

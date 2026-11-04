@@ -8049,7 +8049,7 @@ int CLI::run(int argc, char **argv)
                 BOOST_LOG_TRIVIAL(info) << boost::format("plate %1% print by object, set from plate self")%(i+1);
                 plate_bbox->is_seq_print = true;
             }
-            plate_bbox->first_extruder = print->get_tool_ordering().first_extruder();
+            plate_bbox->first_extruder = print->nonplanar() ? 0 : print->get_tool_ordering().first_extruder();
             //bed type;
             BedType plate_bed_type = part_plate->get_bed_type();
             if (plate_bed_type == btDefault) {

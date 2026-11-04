@@ -120,6 +120,9 @@ placement is frozen: changing object/volume/instance transforms requires a new
 layer import. G-code carries the same source and schema version, and native
 per-segment band dimensions. The processor and libvgcode propagate these through
 preview; ordinary moves retain their original representation.
+Legacy first-layer project metadata uses native path bounds, the union's
+projected deposited area, tool zero, and the maximum modeled vertical gap for
+its single height field. It does not require synthetic planar slice objects.
 
 ## Input and UI
 

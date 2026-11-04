@@ -3273,6 +3273,22 @@ BoundingBox PrintObject::get_first_layer_bbox(float& a, float& layer_height, std
     BoundingBox bbox;
     a = 0;
     name = this->model_object()->name;
+    if (this->print()->nonplanar() && this->print()->m_nonplanar_job) {
+        const auto &job = *this->print()->m_nonplanar_job;
+        layer_height = 0.;
+        for (const auto &path : job.layers.front().paths) if (path.object_id == this->id().id) {
+            bbox.merge(Point(scale_(path.start.x),scale_(path.start.y)));
+            a += path.projected_area/(SCALING_FACTOR*SCALING_FACTOR);
+            for (const auto &segment : path.segments) {
+                bbox.merge(Point(scale_(segment.end.x),scale_(segment.end.y)));
+                // The legacy metadata has one scalar height; use the maximum
+                // modeled gap. Native preview retains every segment's dimensions.
+                layer_height = std::max(layer_height,float(segment.vertical_height));
+            }
+        }
+        bbox.offset(scale_(job.settings.width*.5));
+        return bbox;
+    }
     if (layer_count() > 0) {
         auto layer = get_layer(0);
         layer_height = layer->height;

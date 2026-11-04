@@ -232,6 +232,7 @@ std::shared_ptr<Job> prepare(Print &print, const std::string &text)
         if (mo->volumes.size() != 1) invalid(_u8L("use one watertight model volume per object"));
         for (const auto &instance : po->instances()) {
             Object object;
+            object.id = po->id().id;
             for (const auto *volume : mo->volumes) {
                 if (!volume->is_model_part()) invalid(_u8L("modifier and negative volumes are unsupported; use a watertight mesh with native cavities"));
                 for (const auto &key : volume->config.get().keys())

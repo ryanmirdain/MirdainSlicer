@@ -2,13 +2,14 @@
 
 #include "LayerStack.hpp"
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <vector>
 
 namespace Slic3r::Nonplanar {
 
 struct Triangle { std::array<XYZ,3> vertices; };
-struct Object { std::vector<Triangle> triangles; };
+struct Object { std::vector<Triangle> triangles; uint64_t id = 0; };
 enum class Role { OuterWall, InnerWall, SparseInfill, SolidInfill, TopSkin, BottomSkin };
 
 // Dimensions describe the actual swept band, not a planar bead relocated in Z.
@@ -20,6 +21,8 @@ struct Path {
     XYZ start;
     Role role;
     std::vector<Segment> segments;
+    uint64_t object_id = 0;
+    double projected_area = 0.;
 };
 struct Layer {
     std::vector<Path> paths;

@@ -189,10 +189,11 @@ class Planner {
 public:
     Planner(const LayerStack &s, const Settings &p) : stack(s), settings(p), deposited(s.layers.size()) {}
 
-    Path path(const Path64 &points, bool closed, size_t k, Role role)
+    Path path(const Path64 &points, bool closed, size_t k, Role role, uint64_t object_id)
     {
         Path out;
         out.role = role;
+        out.object_id = object_id;
         const size_t seam = closed ? size_t(std::min_element(points.begin(),points.end(),[](Point64 a, Point64 b) {
             return a.x == b.x ? a.y < b.y : a.x < b.x;
         })-points.begin()) : 0;
@@ -220,7 +221,7 @@ private:
     const Settings &settings;
     std::vector<Paths64> deposited;
 
-    double account_volume(XY a, XY b, size_t k)
+    double account_volume(XY a, XY b, size_t k, double &projected_area)
     {
         const double length = std::hypot(b.x-a.x,b.y-a.y), half = settings.width*.5;
         const XY normal {-(b.y-a.y)/length*half,(b.x-a.x)/length*half};
@@ -228,7 +229,8 @@ private:
                       point({b.x-normal.x,b.y-normal.y}),point({b.x+normal.x,b.y+normal.y})};
         const Paths64 fresh = difference({strip},deposited[k]);
         deposited[k] = Union(deposited[k],Paths64{strip},FillRule::NonZero);
-        if (fresh.empty() || Area(fresh) <= 1.) return 0.; // below the integer chart's area resolution
+        projected_area = Area(fresh)/(scale*scale);
+        if (projected_area <= 1./(scale*scale)) { projected_area = 0.; return 0.; }
         // Attribute shared corner/seam/neighbor-wall volume only once. This
         // keeps the union of modeled beads and the commanded volume consistent.
         const Surface &below = k ? stack.layers[k-1] : stack.bed;
@@ -341,7 +343,9 @@ private:
             if (depth >= 24) invalid(_u8L("line width cannot represent transverse surface curvature/thickness within geometry tolerance; use a narrower line or a larger tolerance"));
             segment(out,a,mid,k,depth+1); segment(out,mid,b,k,depth+1); return;
         }
-        const double volume = account_volume(a,b,k);
+        double projected_area;
+        const double volume = account_volume(a,b,k,projected_area);
+        out.projected_area += projected_area;
         out.segments.push_back({q,volume,gap,normal,settings.width*std::sqrt(1.+cross_slope*cross_slope),-cross_slope,max_top_z});
     }
 };
@@ -412,7 +416,7 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
             for (int wall = 0; wall < settings.walls; ++wall) {
                 const auto contours = inset(safe,wall*settings.width,tol);
                 for (const auto &p : contours) if (p.size() >= 3)
-                    layer.paths.push_back(planner.path(p,true,k,wall ? Role::InnerWall : Role::OuterWall));
+                    layer.paths.push_back(planner.path(p,true,k,wall ? Role::InnerWall : Role::OuterWall,object.id));
             }
             Paths64 interior = inset(safe,(settings.walls-.5)*settings.width,tol);
             // Skin propagation follows material presence on neighboring supplied
@@ -439,7 +443,7 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
                                                    Clipper2Lib::EndType::Polygon,2.,tol*scale/8.);
                 const auto centers = intersect(expanded,safe);
                 for (const auto &p : infill(centers,stack,spacing,settings.infill_angle+90.*(k%2))) if (p.size() >= 2)
-                    layer.paths.push_back(planner.path(p,false,k,role));
+                    layer.paths.push_back(planner.path(p,false,k,role,object.id));
             };
             fill(top,settings.width,Role::TopSkin);
             fill(bottom_only,settings.width,Role::BottomSkin);
