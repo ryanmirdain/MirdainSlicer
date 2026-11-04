@@ -1,4 +1,4 @@
-# Native nonplanar implementation continuation
+# Native nonplanar implementation and build
 
 User-selected repository: https://github.com/ryanmirdain/MirdainSlicer
 Working branch: `main`; initial checkout: `79985162e4c83a0749dbebeb77dff562aeca45da`.
@@ -95,19 +95,67 @@ docker run --rm --name mirdain-orca-native-build --user 501:20 \
   cmake --build build --config Release --parallel 8
 ```
 
+For a native Ubuntu 24.04 machine with 32 GB available to the build, `-J 8`
+can replace `-J 1` in the full build commands above. Packaging the already built
+application separately uses:
+
+```sh
+docker run --rm --name mirdain-orca-native-package --user 501:20 \
+  --mount type=bind,src="$PWD",dst=/__w/OrcaSlicer/OrcaSlicer \
+  -w /__w/OrcaSlicer/OrcaSlicer/build \
+  orcaslicer-linux-builder:ubuntu-24.04--cmake-4.3.0--4fc88e178d94 \
+  ./src/build_linux_image.sh -i -R Release
+```
+
+On the Ubuntu host itself, the equivalent packaging command from `build/` is
+`./src/build_linux_image.sh -i -R Release`. The `501:20` container user above is
+this checkout's macOS owner/group; select the checkout owner's UID/GID elsewhere.
+
 Host logs: `/tmp/MirdainSlicer-native-build.log` (dependency/configuration build),
 `/tmp/MirdainSlicer-native-heavy-gui.log` (serial large GUI units),
 `/tmp/MirdainSlicer-native-app-final.log` (successful full application build), and
-`/tmp/MirdainSlicer-native-release.log` (final incremental build).
+`/tmp/MirdainSlicer-native-release.log` (successful final incremental build), and
+`/tmp/MirdainSlicer-native-package.log` (successful AppImage packaging).
 
-## In progress / not yet established
+## Completed build artifacts
 
 The complete Release application, native slicing library, GUI library and Python
-module linked successfully. The executable is an aarch64 Linux ELF at
-`build/src/Release/orca-slicer`. The latest first-layer metadata changes still
-need their incremental compile/relink, followed by AppImage packaging and checksum
-recording. Link-time optimization reports an existing TBB `notify_type` enum ODR
-warning from dependency sources; this was not changed or behaviorally evaluated.
+module linked successfully, including the final first-layer metadata changes.
+The final build used clean commit
+`93f1a9faba00c19ce61045315268158e0caf4d2b` on 2026-11-04. Subsequent report-only
+commits do not change the source compiled into this artifact.
+
+- AppImage: `build/OrcaSlicer_Linux_V2.5.0-dev.AppImage`, aarch64 Linux,
+  207,706,632 bytes. SHA256:
+  `ed50da37197ea61ca7f3019593d720c32a39d74fbd86d3d52763edb1ef0b4d21`.
+- Checksum file: `build/OrcaSlicer_Linux_V2.5.0-dev.AppImage.sha256`.
+- Unpacked application: `build/package/`; standalone ELF:
+  `build/src/Release/orca-slicer`.
+- The final ELF and the packaged `build/package/bin/orca-slicer` have identical
+  SHA256 `f0e43509d5629990adeb4ab93990ac54a5df435fbe94c289616ecb623f899e8c`.
+- The packaging dependency audit passed. The schema and both example files are
+  included under the package's `resources/nonplanar/` directory. AppImage creation
+  completed successfully using appimagetool `4919cc4` (build 368).
+
+Link-time optimization reports an existing TBB `notify_type` enum ODR warning
+from dependency sources; this was not changed or behaviorally evaluated.
+`appstreamcli` was absent, so optional AppStream metadata validation did not run;
+the existing application metadata was included in the AppImage.
+
+## Scope and remaining unverified behavior
+
+The basic native source path and Linux arm64 build/package are implemented.
+The detailed surface, original-mesh intersection, complete-band containment,
+bead/flow, CLI and GUI conventions are in [the design document](docs/HLSD/Nonplanar.md).
+The source contains explicit nonplanar-only guards for unsupported features and
+configurations. In particular, use a single tool, one watertight volume per object,
+classic walls, consistent line widths and rectilinear fills; supports/bridges,
+modifiers, multi-tool strategies, ironing, postprocessing and planar caches are
+not implemented for native nonplanar jobs. The original standard pipeline remains
+selected for ordinary inputs; its runtime regression behavior has not been checked.
 No runtime slices, GUI sessions, regression checks or printer jobs have run.
 amd64 has not been built. Nothing has been pushed, deployed or submitted upstream.
-Do not describe a partial or compile-only implementation as behaviorally verified.
+No functional correctness or physical printing guarantee follows from this build.
+Further runtime/GUI/print validation and other architecture builds are follow-up
+work. Continue to obey the prohibition on writing or running tests unless the
+user changes that instruction. No required build/package stage remains pending.
