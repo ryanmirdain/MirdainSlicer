@@ -74,60 +74,6 @@ double first(const DynamicPrintConfig &c, const char *key, double fallback)
     const auto *o = c.option<ConfigOptionFloats>(key);
     return o && !o->values.empty() ? o->values.front() : fallback;
 }
-void reject_bool(const DynamicPrintConfig &c, const char *key)
-{
-    const auto *option = c.option(key);
-    if (!option) return;
-    const auto *values = dynamic_cast<const ConfigOptionVector<unsigned char>*>(option);
-    const bool enabled = values ? std::any_of(values->values.begin(),values->values.end(),[](auto v) { return v != 0; }) : option->getBool();
-    if (enabled) invalid(Slic3r::format(_u8L("%1% is unsupported; disable it explicitly"),key));
-}
-void validate_config(const DynamicPrintConfig &c)
-{
-    for (const auto *key : {"enable_support","enable_prime_tower","spiral_mode","belt_printer",
-                           "enable_overhang_speed", "enable_wrapping_detection", "detect_thin_wall"})
-        reject_bool(c,key);
-    if (c.opt_enum<ArcFittingMode>("enable_arc_fitting") != ArcFittingMode::Disabled)
-        invalid(_u8L("arc fitting is unsupported; disable it explicitly"));
-    if (c.opt_serialize("sparse_infill_pattern") != "rectilinear") invalid(_u8L("sparse_infill_pattern must be rectilinear"));
-    if (c.opt_serialize("wall_generator") != "classic") invalid(_u8L("wall_generator must be classic"));
-    if (c.opt_serialize("seam_position") != "aligned" || c.opt_serialize("seam_slope_type") != "none")
-        invalid(_u8L("nonplanar walls require aligned seams without scarf joints"));
-    reject_bool(c,"staggered_inner_seams");
-    for (auto key : {"xy_hole_compensation","xy_contour_compensation","elefant_foot_compensation"})
-        if (scalar(c,key,0.) != 0.) invalid(Slic3r::format(_u8L("%1% must be zero to preserve original-model containment"),key));
-    if (first(c,"filament_shrink",100.) != 100. || first(c,"filament_shrinkage_compensation_z",100.) != 100.)
-        invalid(_u8L("filament shrink compensation must be 100%; the supplied surfaces use original physical geometry"));
-    if (c.opt_serialize("gcode_remap_x") != "pos_x" || c.opt_serialize("gcode_remap_y") != "pos_y" || c.opt_serialize("gcode_remap_z") != "pos_z")
-        invalid(_u8L("G-code axis remapping is unsupported in nonplanar mode"));
-    for (auto key : {"top_surface_pattern","bottom_surface_pattern","internal_solid_infill_pattern"})
-        if (c.opt_serialize(key) != "rectilinear") invalid(Slic3r::format(_u8L("%1% must be rectilinear"),key));
-    reject_bool(c,"infill_combination");
-    if (scalar(c,"top_surface_density",100.) != 100. || scalar(c,"bottom_surface_density",100.) != 100.)
-        invalid(_u8L("nonplanar top and bottom skins require 100% density"));
-    if (scalar(c,"top_shell_thickness",0.) != 0. || scalar(c,"bottom_shell_thickness",0.) != 0.)
-        invalid(_u8L("minimum shell-thickness overrides are unsupported; set them to zero and select top/bottom shell layer counts"));
-    if (c.opt_serialize("ironing_type") != "no ironing") invalid(_u8L("ironing is unsupported"));
-    if (c.opt_serialize("fuzzy_skin") != "none") invalid(_u8L("fuzzy skin is unsupported"));
-    if (c.opt_serialize("print_sequence") != "by layer") invalid(_u8L("print_sequence must be by layer"));
-    if (scalar(c,"brim_width",0.) != 0. || scalar(c,"skirt_loops",0.) != 0. || scalar(c,"raft_layers",0.) != 0.)
-        invalid(_u8L("brim, skirt and raft must be disabled"));
-    if (c.option<ConfigOptionFloats>("nozzle_diameter")->values.size() != 1)
-        invalid(_u8L("only single-tool machines are supported"));
-    if (c.option<ConfigOptionFloats>("filament_diameter")->values.size() != 1)
-        invalid(_u8L("exactly one filament is supported"));
-    if (c.opt_serialize("printer_structure") != "undefine" &&
-        c.opt_serialize("printer_structure") != "corexy" && c.opt_serialize("printer_structure") != "i3")
-        invalid(_u8L("only Cartesian and CoreXY machines are supported"));
-    if (c.has("slicing_pipeline_plugin") && !c.option<ConfigOptionStrings>("slicing_pipeline_plugin")->values.empty())
-        invalid(_u8L("slicing pipeline plugins are unsupported"));
-    if (c.has("post_process") && !c.option<ConfigOptionStrings>("post_process")->values.empty())
-        invalid(_u8L("postprocessing scripts are unsupported"));
-    if (scalar(c,"z_offset",0.) != 0.) invalid(_u8L("z_offset must be zero; supply heights in physical plate coordinates"));
-    for (auto key : {"before_layer_change_gcode","layer_change_gcode","time_lapse_gcode"})
-        if (c.has(key) && !c.opt_string(key).empty()) invalid(Slic3r::format(_u8L("%1% is unsupported in nonplanar mode"),key));
-}
-
 void validate_mesh(const indexed_triangle_set &mesh)
 {
     std::unordered_map<uint64_t,std::pair<unsigned,int>> edges;
@@ -197,7 +143,6 @@ std::shared_ptr<Job> prepare(Print &print, const std::string &text)
     if (saved == items.end() || saved->second != placement(model))
         invalid(_u8L("model placement changed since layer import; restore placement or import redesigned layers"));
     const auto &config = print.full_print_config();
-    validate_config(config);
     if (!model.get_curr_plate_custom_gcodes().gcodes.empty()) invalid(_u8L("per-height custom G-code is unsupported"));
     Settings &s = job->settings;
     s.nozzle_diameter = first(config,"nozzle_diameter",.4);
@@ -394,6 +339,13 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
         if (print.canceled()) throw CanceledException();
         const Layer &layer = job.layers[k];
         if (k == 1) out << writer.set_bed_temperature(bed->values.front(),false) << writer.set_temperature(nozzle->values.front(),false);
+        parser.set("layer_num",int(k));
+        parser.set("layer_z",layer.max_z);
+        out << "; FEATURE: Custom\n";
+        for (const char *key : {"before_layer_change_gcode","layer_change_gcode","time_lapse_gcode"})
+            if (config.has(key) && !config.opt_string(key).empty())
+                out << parser.process(config.opt_string(key),0,nullptr,&context) << '\n';
+        out << writer.preamble() << writer.reset_e(true);
         out << "; CHANGE_LAYER\n; Z_HEIGHT: " << layer.max_z << '\n';
         double seconds = 0.;
         for (const auto &path : layer.paths) {
