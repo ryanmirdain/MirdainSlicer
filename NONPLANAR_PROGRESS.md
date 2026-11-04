@@ -7,6 +7,9 @@ the pasted request to start a fresh checkout at the release tag.
 Upstream `git ls-remote` independently verified on 2026-11-04:
 `refs/tags/v2.4.2 = 8500fcdccaa10b5099ac20d252af3a7c560046f1`.
 The local checkout has not been reset/rebased, and no branch was created.
+Implementation commit: `4f44528708` (native geometry, planning, CLI/GUI,
+metadata, preview and dependency build option). Follow-up source review changes
+are being compiled before the final integration commit.
 
 No tests may be written or run. Only source review, compiling and packaging are
 authorized. Compilation establishes type/link compatibility; it does not prove
@@ -37,8 +40,8 @@ default OFF, to prevent that implicit workload in subsequent builds.
 
 Host is macOS arm64; Docker provides native Linux aarch64. No web-slicer image,
 source, experiment or service is used. An independent Ubuntu 24.04 build image
-was built by the fork's own `build_linux.sh`. Initial dependency/full/package
-build was started with:
+was built by the fork's own `build_linux.sh`. The dependency/full/package build
+command with the CPython workload explicitly disabled is:
 
 ```sh
 ./build_linux.sh -g -dsi -j 6 -J 2 -r -- -DSLIC3R_CAD=OFF -DBUILD_TESTS=OFF -DORCA_PYTHON_PGO=OFF
@@ -80,14 +83,16 @@ Source edits after that compile still need the final incremental build.
 
 ## In progress / not yet established
 
-The complete application and package build is still running. GCC's parallel
+The core slicing library linked successfully. The GUI/application and package
+build is still running. GCC's parallel
 Release build exhausted the Docker VM's approximately 8 GB memory in an upstream
 CGAL translation unit. Resume with lower application build concurrency (the
 successful dependency builds can be reused). This document must
 be updated with its actual result and artifact paths before delivery. Native
-emission/startup template compatibility and preview shader integration still
-need source review and compilation. Final bead-envelope/flow details and machine
-clearance restrictions must be kept consistent between code and design docs.
+emission/startup templates, original band/flow conventions and preview were
+source-reviewed; the shader stages compiled and linked. Final source edits,
+including mode-switch cache clearing and UTF-8 GUI snapshots, need the final
+incremental compile. Keep the code and design document consistent.
 No runtime slices, GUI sessions, regression checks or printer jobs have run.
 amd64 has not been built. Nothing has been pushed, deployed or submitted upstream.
 Do not describe a partial or compile-only implementation as behaviorally verified.

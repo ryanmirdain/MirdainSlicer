@@ -1,4 +1,6 @@
 #include "Print.hpp"
+#include "../I18N.hpp"
+#include "../format.hpp"
 #include "../Print.hpp"
 #include "../Model.hpp"
 #include "../PrintConfig.hpp"
@@ -28,7 +30,7 @@
 
 namespace Slic3r::Nonplanar {
 namespace {
-[[noreturn]] void invalid(const std::string &s) { throw std::invalid_argument("Nonplanar slicing: " + s); }
+[[noreturn]] void invalid(const std::string &s) { throw std::invalid_argument(Slic3r::format(_u8L("Nonplanar slicing: %1%"),s)); }
 constexpr const char *placement_key = "orca_nonplanar_placement_v1";
 
 // Stable across project save/reload (object IDs are intentionally excluded).
@@ -61,7 +63,7 @@ double scalar(const DynamicPrintConfig &c, const char *key, double fallback)
     if (const auto *v = dynamic_cast<const ConfigOptionFloats*>(o)) return v->values.front();
     if (const auto *v = dynamic_cast<const ConfigOptionFloatsNullable*>(o)) {
         const double value = v->values.front();
-        if (!std::isfinite(value)) invalid(std::string(key) + " must be explicitly set for nonplanar slicing");
+        if (!std::isfinite(value)) invalid(Slic3r::format(_u8L("%1% must be explicitly set for nonplanar slicing"),key));
         return value;
     }
     if (const auto *v = dynamic_cast<const ConfigOptionInts*>(o)) return v->values.front();
@@ -73,49 +75,51 @@ double first(const DynamicPrintConfig &c, const char *key, double fallback)
     return o && !o->values.empty() ? o->values.front() : fallback;
 }
 void reject_bool(const DynamicPrintConfig &c, const char *key)
-{ if (c.has(key) && c.opt_bool(key)) invalid(std::string(key) + " is unsupported; disable it explicitly"); }
+{ if (c.has(key) && c.opt_bool(key)) invalid(Slic3r::format(_u8L("%1% is unsupported; disable it explicitly"),key)); }
 void validate_config(const DynamicPrintConfig &c)
 {
     for (const auto *key : {"enable_support","enable_prime_tower","spiral_mode","belt_printer", "enable_arc_fitting",
                            "enable_overhang_speed", "enable_wrapping_detection", "detect_thin_wall"})
         reject_bool(c,key);
-    if (c.opt_serialize("sparse_infill_pattern") != "rectilinear") invalid("sparse_infill_pattern must be rectilinear");
-    if (c.opt_serialize("wall_generator") != "classic") invalid("wall_generator must be classic");
+    if (c.opt_serialize("sparse_infill_pattern") != "rectilinear") invalid(_u8L("sparse_infill_pattern must be rectilinear"));
+    if (c.opt_serialize("wall_generator") != "classic") invalid(_u8L("wall_generator must be classic"));
     if (c.opt_serialize("seam_position") != "aligned" || c.opt_serialize("seam_slope_type") != "none")
-        invalid("nonplanar walls require aligned seams without scarf joints");
+        invalid(_u8L("nonplanar walls require aligned seams without scarf joints"));
     reject_bool(c,"staggered_inner_seams");
     for (auto key : {"xy_hole_compensation","xy_contour_compensation","elefant_foot_compensation"})
-        if (scalar(c,key,0.) != 0.) invalid(std::string(key) + " must be zero to preserve original-model containment");
+        if (scalar(c,key,0.) != 0.) invalid(Slic3r::format(_u8L("%1% must be zero to preserve original-model containment"),key));
     if (first(c,"filament_shrink",100.) != 100. || first(c,"filament_shrinkage_compensation_z",100.) != 100.)
-        invalid("filament shrink compensation must be 100%; the supplied surfaces use original physical geometry");
+        invalid(_u8L("filament shrink compensation must be 100%; the supplied surfaces use original physical geometry"));
     if (c.opt_serialize("gcode_remap_x") != "pos_x" || c.opt_serialize("gcode_remap_y") != "pos_y" || c.opt_serialize("gcode_remap_z") != "pos_z")
-        invalid("G-code axis remapping is unsupported in nonplanar mode");
+        invalid(_u8L("G-code axis remapping is unsupported in nonplanar mode"));
     for (auto key : {"top_surface_pattern","bottom_surface_pattern","internal_solid_infill_pattern"})
-        if (c.opt_serialize(key) != "rectilinear") invalid(std::string(key) + " must be rectilinear");
+        if (c.opt_serialize(key) != "rectilinear") invalid(Slic3r::format(_u8L("%1% must be rectilinear"),key));
     reject_bool(c,"infill_combination");
     if (scalar(c,"top_surface_density",100.) != 100. || scalar(c,"bottom_surface_density",100.) != 100.)
-        invalid("nonplanar top and bottom skins require 100% density");
-    if (c.opt_serialize("ironing_type") != "no ironing") invalid("ironing is unsupported");
-    if (c.opt_serialize("fuzzy_skin") != "none") invalid("fuzzy skin is unsupported");
-    if (c.opt_serialize("print_sequence") != "by layer") invalid("print_sequence must be by layer");
+        invalid(_u8L("nonplanar top and bottom skins require 100% density"));
+    if (scalar(c,"top_shell_thickness",0.) != 0. || scalar(c,"bottom_shell_thickness",0.) != 0.)
+        invalid(_u8L("minimum shell-thickness overrides are unsupported; set them to zero and select top/bottom shell layer counts"));
+    if (c.opt_serialize("ironing_type") != "no ironing") invalid(_u8L("ironing is unsupported"));
+    if (c.opt_serialize("fuzzy_skin") != "none") invalid(_u8L("fuzzy skin is unsupported"));
+    if (c.opt_serialize("print_sequence") != "by layer") invalid(_u8L("print_sequence must be by layer"));
     if (scalar(c,"brim_width",0.) != 0. || scalar(c,"skirt_loops",0.) != 0. || scalar(c,"raft_layers",0.) != 0.)
-        invalid("brim, skirt and raft must be disabled");
+        invalid(_u8L("brim, skirt and raft must be disabled"));
     if (c.option<ConfigOptionFloats>("nozzle_diameter")->values.size() != 1)
-        invalid("only single-tool machines are supported");
+        invalid(_u8L("only single-tool machines are supported"));
     if (c.option<ConfigOptionFloats>("filament_diameter")->values.size() != 1)
-        invalid("exactly one filament is supported");
+        invalid(_u8L("exactly one filament is supported"));
     if (c.opt_serialize("printer_structure") != "undefine" &&
         c.opt_serialize("printer_structure") != "corexy" && c.opt_serialize("printer_structure") != "i3")
-        invalid("only Cartesian and CoreXY machines are supported");
+        invalid(_u8L("only Cartesian and CoreXY machines are supported"));
     if (c.has("slicing_pipeline_plugin") && !c.option<ConfigOptionStrings>("slicing_pipeline_plugin")->values.empty())
-        invalid("slicing pipeline plugins are unsupported");
+        invalid(_u8L("slicing pipeline plugins are unsupported"));
     if (c.has("post_process") && !c.option<ConfigOptionStrings>("post_process")->values.empty())
-        invalid("postprocessing scripts are unsupported");
+        invalid(_u8L("postprocessing scripts are unsupported"));
     if (has_bed_exclude_volumes(c) || !c.option<ConfigOptionPoints>("bed_exclude_area")->values.empty())
-        invalid("machine exclusion regions are not yet supported by nonplanar travel planning");
-    if (scalar(c,"z_offset",0.) != 0.) invalid("z_offset must be zero; supply heights in physical plate coordinates");
+        invalid(_u8L("machine exclusion regions are not yet supported by nonplanar travel planning"));
+    if (scalar(c,"z_offset",0.) != 0.) invalid(_u8L("z_offset must be zero; supply heights in physical plate coordinates"));
     for (auto key : {"before_layer_change_gcode","layer_change_gcode","time_lapse_gcode"})
-        if (c.has(key) && !c.opt_string(key).empty()) invalid(std::string(key) + " is unsupported in nonplanar mode");
+        if (c.has(key) && !c.opt_string(key).empty()) invalid(Slic3r::format(_u8L("%1% is unsupported in nonplanar mode"),key));
 }
 
 void validate_mesh(const indexed_triangle_set &mesh)
@@ -128,8 +132,8 @@ void validate_mesh(const indexed_triangle_set &mesh)
     }
     for (const auto &entry : edges)
         if (entry.second.first != 2 || entry.second.second != 0)
-            invalid("original mesh must be closed, manifold and consistently oriented");
-    if (its_volume(mesh) <= 0.) invalid("original mesh must have outward orientation and positive volume");
+            invalid(_u8L("original mesh must be closed, manifold and consistently oriented"));
+    if (its_volume(mesh) <= 0.) invalid(_u8L("original mesh must have outward orientation and positive volume"));
 }
 
 const char *role_name(Role role)
@@ -154,7 +158,7 @@ std::string source(const Model &model, int plate)
     const auto it = items.find(metadata_key);
     if (it == items.end()) return {};
     const auto version = items.find(version_key);
-    if (version == items.end() || version->second != "1") invalid("unsupported or missing embedded nonplanar schema version");
+    if (version == items.end() || version->second != "1") invalid(_u8L("unsupported or missing embedded nonplanar schema version"));
     const auto stack = LayerStack::parse(it->second);
     return stack.plate_index == plate ? stack.source : std::string();
 }
@@ -180,15 +184,15 @@ std::shared_ptr<Job> prepare(Print &print, const std::string &text)
     job->stack = LayerStack::parse(text);
     if (job->stack.limits.geometry_tolerance < .0002 || job->stack.limits.chord_tolerance < .0002 ||
         job->stack.limits.max_segment_length <= .0002)
-        invalid("native G-code uses four decimal XYZ coordinates; geometry/chord tolerances must be >= 0.0002 mm and max segment length > 0.0002 mm");
+        invalid(_u8L("native G-code uses four decimal XYZ coordinates; geometry/chord tolerances must be >= 0.0002 mm and max segment length > 0.0002 mm"));
     const auto &model = print.model();
     const auto &items = model.model_info->metadata_items;
     const auto saved = items.find(placement_key);
     if (saved == items.end() || saved->second != placement(model))
-        invalid("model placement changed since layer import; restore placement or import redesigned layers");
+        invalid(_u8L("model placement changed since layer import; restore placement or import redesigned layers"));
     const auto &config = print.full_print_config();
     validate_config(config);
-    if (!model.get_curr_plate_custom_gcodes().gcodes.empty()) invalid("per-height custom G-code is unsupported");
+    if (!model.get_curr_plate_custom_gcodes().gcodes.empty()) invalid(_u8L("per-height custom G-code is unsupported"));
     Settings &s = job->settings;
     s.nozzle_diameter = first(config,"nozzle_diameter",.4);
     s.min_normal_height = first(config,"min_layer_height",0.);
@@ -200,7 +204,7 @@ std::shared_ptr<Job> prepare(Print &print, const std::string &text)
     for (auto key : {"outer_wall_line_width","inner_wall_line_width","sparse_infill_line_width", "internal_solid_infill_line_width","top_surface_line_width", "initial_layer_line_width"}) {
         const double width = config.get_abs_value(key,s.nozzle_diameter);
         if (width != 0. && std::abs(width-s.width) > 1e-5)
-            invalid(std::string(key) + " must equal line_width (or be zero for automatic width)");
+            invalid(Slic3r::format(_u8L("%1% must equal line_width (or be zero for automatic width)"),key));
     }
     s.walls = config.opt_int("wall_loops");
     s.top_layers = config.opt_int("top_shell_layers");
@@ -211,21 +215,21 @@ std::shared_ptr<Job> prepare(Print &print, const std::string &text)
     s.clearance_radius = scalar(config,"extruder_clearance_radius",0.);
     s.clearance_height = std::min({scalar(config,"extruder_clearance_height_to_rod",0.),
                                   scalar(config,"extruder_clearance_height_to_lid",0.), scalar(config,"nozzle_height",0.)});
-    if (s.clearance_radius <= 0 || s.clearance_height <= 0) invalid("positive toolhead clearance radius and height are required");
+    if (s.clearance_radius <= 0 || s.clearance_height <= 0) invalid(_u8L("positive toolhead clearance radius and height are required"));
     std::vector<Object> objects;
     const Vec3d origin = print.get_plate_origin();
     Polygon bed_polygon = Polygon::new_scale(config.option<ConfigOptionPoints>("printable_area")->values);
     for (const auto *po : print.objects()) {
         const auto *mo = po->model_object();
         for (const auto &key : mo->config.get().keys())
-            if (key != "extruder" || mo->config.get().opt_int(key) > 1) invalid("per-object overrides are unsupported");
-        if (mo->volumes.size() != 1) invalid("use one watertight model volume per object");
+            if (key != "extruder" || mo->config.get().opt_int(key) > 1) invalid(_u8L("per-object overrides are unsupported"));
+        if (mo->volumes.size() != 1) invalid(_u8L("use one watertight model volume per object"));
         for (const auto &instance : po->instances()) {
             Object object;
             for (const auto *volume : mo->volumes) {
-                if (!volume->is_model_part()) invalid("modifier and negative volumes are unsupported; use a watertight mesh with native cavities");
+                if (!volume->is_model_part()) invalid(_u8L("modifier and negative volumes are unsupported; use a watertight mesh with native cavities"));
                 for (const auto &key : volume->config.get().keys())
-                    if (key != "extruder" || volume->config.get().opt_int(key) > 1) invalid("per-volume overrides are unsupported");
+                    if (key != "extruder" || volume->config.get().opt_int(key) > 1) invalid(_u8L("per-volume overrides are unsupported"));
                 const Transform3d transform = instance.model_instance->get_matrix()*volume->get_matrix();
                 const auto &mesh = volume->mesh().its;
                 validate_mesh(mesh);
@@ -234,7 +238,7 @@ std::shared_ptr<Job> prepare(Print &print, const std::string &text)
                     for (int n = 0; n < 3; ++n) {
                         const Vec3d p = transform*mesh.vertices[face[n]].cast<double>()-origin;
                         if (!bed_polygon.contains(Point(scale_(p.x()),scale_(p.y()))))
-                            invalid("model is outside the printable area");
+                            invalid(_u8L("model is outside the printable area"));
                         triangle.vertices[n] = {p.x(),p.y(),p.z()};
                     }
                     if (transform.linear().determinant() < 0) std::swap(triangle.vertices[1],triangle.vertices[2]);
@@ -312,7 +316,7 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
         if (requested == 0.) requested = speed; // Orca's automatic speed, conservatively bounded.
         if (k == 0) requested = std::min(requested,scalar(config,
             path.role == Role::OuterWall || path.role == Role::InnerWall ? "initial_layer_speed" : "initial_layer_infill_speed",requested));
-        if (requested <= 0. || !std::isfinite(requested)) invalid("native deposition speed must be positive and finite");
+        if (requested <= 0. || !std::isfinite(requested)) invalid(_u8L("native deposition speed must be positive and finite"));
         const Vec3d end = vec(segment.end);
         const double length = (end-previous).norm(), rate = segment.volume*ratio/length;
         double feed = max_flow > 0 ? std::min(requested,max_flow/rate) : requested;
@@ -368,11 +372,11 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
         for (const auto &path_data : layer.paths) {
             const Vec3d start = vec(path_data.start);
             const double safe_z = std::max(printed_max,start.z()) + std::max(1.,job.stack.limits.max_gap)+tol;
-            if (safe_z > job.settings.max_z) invalid("collision-free travel exceeds machine Z height");
+            if (safe_z > job.settings.max_z) invalid(_u8L("collision-free travel exceeds machine Z height"));
             // The available toolhead profile is a radius and a bottom clearance
             // height. Conservatively clear the whole printed height envelope.
             if (start.z()+job.settings.clearance_height <= printed_max+tol)
-                invalid("toolhead clearance cannot reach this path below already printed geometry");
+                invalid(_u8L("toolhead clearance cannot reach this path below already printed geometry"));
             out << writer.retract() << writer.set_speed(xy_travel*60.);
             out << writer.travel_to_z(safe_z,"nonplanar clearance",true);
             out << writer.travel_to_xyz({start.x(),start.y(),safe_z},"nonplanar travel",true);
@@ -384,7 +388,7 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
                 const double maximum_feed = segment_feed(path_data,segment,previous,k);
                 const double feed = std::min(maximum_feed,std::max(first(config,"slow_down_min_speed",0.),maximum_feed*cooling_scale));
                 if (end.z()+job.settings.clearance_height <= printed_max+tol)
-                    invalid("toolhead clearance fails along a nonplanar deposition path");
+                    invalid(_u8L("toolhead clearance fails along a nonplanar deposition path"));
                 // Native metadata drives modeled preview dimensions per segment.
                 out << "; LINE_WIDTH: " << segment.physical_width << "\n; LAYER_HEIGHT: " << segment.normal_height
                     << "\n;NONPLANAR_BAND:" << job.settings.width << ',' << segment.vertical_height << ','

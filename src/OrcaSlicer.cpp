@@ -1394,10 +1394,10 @@ int CLI::run(int argc, char **argv)
             const auto *orient = m_config.option<ConfigOptionInt>("orient");
             if (!m_given_option_keys.count("arrange") || !m_given_option_keys.count("orient") ||
                 !arrange || arrange->value != 0 || !orient || orient->value != 0)
-                throw std::invalid_argument("--nonplanar-layers requires explicit --arrange 0 --orient 0");
+                throw std::invalid_argument(_u8L("--nonplanar-layers requires explicit --arrange 0 --orient 0"));
             for (const auto &key : m_transforms)
                 if (key != "arrange" && key != "orient")
-                    throw std::invalid_argument("--nonplanar-layers forbids post-placement transform: " + key);
+                    throw std::invalid_argument(Slic3r::format(_u8L("--nonplanar-layers forbids post-placement transform: %1%"),key));
         } catch (const std::exception &e) {
             boost::nowide::cerr << e.what() << std::endl;
             flush_and_exit(CLI_INVALID_PARAMS);
@@ -1486,7 +1486,7 @@ int CLI::run(int argc, char **argv)
 
     bool start_gui = m_actions.empty() && !downward_check;
     if (start_gui && nonplanar_layers) {
-        boost::nowide::cerr << "Use File > Import > Import nonplanar layers in the GUI, or supply --slice for nonplanar CLI slicing" << std::endl;
+        boost::nowide::cerr << _u8L("Use File > Import > Import nonplanar layers in the GUI, or supply --slice for nonplanar CLI slicing") << std::endl;
         flush_and_exit(CLI_INVALID_PARAMS);
     }
     if (start_gui) {
@@ -2069,12 +2069,12 @@ int CLI::run(int argc, char **argv)
     for (const auto &model : m_models) {
         if (model.model_info && model.model_info->metadata_items.count(Slic3r::Nonplanar::metadata_key)) {
             if (!m_given_option_keys.count("arrange") || !m_given_option_keys.count("orient")) {
-                boost::nowide::cerr << "Nonplanar projects require explicit --arrange 0 --orient 0" << std::endl;
+                boost::nowide::cerr << _u8L("Nonplanar projects require explicit --arrange 0 --orient 0") << std::endl;
                 flush_and_exit(CLI_INVALID_PARAMS);
             }
             for (const auto &key : m_transforms) {
                 if ((key != "arrange" && key != "orient") || m_config.opt_int(key) != 0) {
-                    boost::nowide::cerr << "Nonplanar projects forbid post-placement transforms: " << key << std::endl;
+                    boost::nowide::cerr << Slic3r::format(_u8L("Nonplanar projects forbid post-placement transforms: %1%"),key) << std::endl;
                     flush_and_exit(CLI_INVALID_PARAMS);
                 }
             }
@@ -4084,7 +4084,7 @@ int CLI::run(int argc, char **argv)
         if (!nonplanar_layers && std::any_of(m_models.begin(),m_models.end(),[](const Model &model) {
                 return model.model_info && model.model_info->metadata_items.count(Slic3r::Nonplanar::metadata_key);
             })) {
-            boost::nowide::cerr << "Supply --nonplanar-layers again for the combined placed model; merging must not discard the saved nonplanar mode" << std::endl;
+            boost::nowide::cerr << _u8L("Supply --nonplanar-layers again for the combined placed model; merging must not discard the saved nonplanar mode") << std::endl;
             flush_and_exit(CLI_INVALID_PARAMS);
         }
         BOOST_LOG_TRIVIAL(info) << "merge all the models into one\n";
@@ -6497,7 +6497,7 @@ int CLI::run(int argc, char **argv)
             if (nonplanar_layers && (nonplanar_layers->plate_index >= partplate_list.get_plate_count() ||
                 (plate_to_slice == 0 && (partplate_list.get_plate_count() != 1 || nonplanar_layers->plate_index != 0)) ||
                 (plate_to_slice != 0 && plate_to_slice != nonplanar_layers->plate_index+1))) {
-                boost::nowide::cerr << "Nonplanar input addresses one zero-based plate_index; use --slice plate_index+1, or --slice 0 for a single plate" << std::endl;
+                boost::nowide::cerr << _u8L("Nonplanar input addresses one zero-based plate_index; use --slice plate_index+1, or --slice 0 for a single plate") << std::endl;
                 flush_and_exit(CLI_INVALID_PARAMS);
             }
             sliced_plate = plate_to_slice;

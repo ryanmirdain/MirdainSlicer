@@ -396,3 +396,7 @@ src/slic3r/GUI/TaskManager.cpp
 src/slic3r/GUI/Widgets/ProgressDialog.hpp
 src/slic3r/GUI/Widgets/StepCtrl.cpp
 src/libslic3r/Nonplanar/Print.cpp
+src/libslic3r/Nonplanar/LayerStack.cpp
+src/libslic3r/Nonplanar/Slicer.cpp
+src/libslic3r/GCode/GCodeProcessor.cpp
+src/OrcaSlicer.cpp

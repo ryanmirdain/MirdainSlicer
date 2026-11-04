@@ -846,6 +846,10 @@ GCodeInputData convert(const Slic3r::Print& print, const std::vector<std::string
 {
     GCodeInputData ret;
     std::vector<VerticesData> data;
+    // Supplied surfaces have no scalar-Z intermediate preview. The completed
+    // native G-code supplies XYZ and the band dimensions through the other
+    // convert() overload; never show stale planar paths while it is generated.
+    if (print.nonplanar()) return ret;
     if (print.is_step_done(Slic3r::psSkirtBrim) && (print.has_skirt() || print.has_brim()))
         // extract vertices and layers zs from skirt/brim
         convert_brim_skirt_to_vertices(print, data);

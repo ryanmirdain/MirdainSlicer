@@ -4430,7 +4430,7 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         if (std::sscanf(text.c_str(),"%f,%f,%f,%f",&band[0],&band[1],&band[2],&band[3]) != 4 ||
             band[0] <= 0 || band[1] <= 0 || band[2] <= 0 ||
             std::any_of(band.begin(),band.end(),[](float v) { return !std::isfinite(v); }))
-            throw std::invalid_argument("Invalid NONPLANAR_BAND G-code dimensions");
+            throw std::invalid_argument(_u8L("Invalid NONPLANAR_BAND G-code dimensions"));
         m_nonplanar_band = band;
         return;
     }

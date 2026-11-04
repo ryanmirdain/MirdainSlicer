@@ -1,4 +1,6 @@
 #include "LayerStack.hpp"
+#include "../I18N.hpp"
+#include "../format.hpp"
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -13,23 +15,23 @@ namespace Slic3r::Nonplanar {
 namespace {
 using Json = nlohmann::json;
 [[noreturn]] void invalid(const std::string &message)
-{ throw std::invalid_argument("Nonplanar layers: " + message); }
+{ throw std::invalid_argument(Slic3r::format(_u8L("Nonplanar layers: %1%"),message)); }
 
 double number(const Json &j, const std::string &label)
 {
-    if (!j.is_number() || !std::isfinite(j.get<double>())) invalid(label + " must be finite");
+    if (!j.is_number() || !std::isfinite(j.get<double>())) invalid(Slic3r::format(_u8L("%1% must be finite"),label));
     return j.get<double>();
 }
 
 std::vector<double> axis(const Json &j, const std::string &name)
 {
-    if (!j.is_array() || j.size() < 2) invalid("grid." + name + " needs at least two values");
+    if (!j.is_array() || j.size() < 2) invalid(Slic3r::format(_u8L("grid.%1% needs at least two values"),name));
     std::vector<double> out;
     for (const auto &v : j) {
         const double n = number(v, "grid." + name);
         // Clipper coordinates use 1e-6 mm. Larger coordinates are not printer coordinates.
-        if (std::abs(n) > 1e7) invalid("grid coordinates exceed the supported physical range");
-        if (!out.empty() && n <= out.back()) invalid("grid." + name + " must be strictly increasing");
+        if (std::abs(n) > 1e7) invalid(_u8L("grid coordinates exceed the supported physical range"));
+        if (!out.empty() && n <= out.back()) invalid(Slic3r::format(_u8L("grid.%1% must be strictly increasing"),name));
         out.push_back(n);
     }
     return out;
@@ -46,12 +48,14 @@ Surface surface(const Json &j, size_t nx, size_t ny, const std::string &label)
     } else if (type == "height_grid") {
         s.plane = false;
         const auto &rows = j.at("z");
-        if (!rows.is_array() || rows.size() != ny) invalid(label + ".z has the wrong row count");
+        if (!rows.is_array() || rows.size() != ny) invalid(Slic3r::format(_u8L("%1%.z has the wrong row count"),label));
         for (const auto &row : rows) {
-            if (!row.is_array() || row.size() != nx) invalid(label + ".z has the wrong column count");
+            if (!row.is_array() || row.size() != nx) invalid(Slic3r::format(_u8L("%1%.z has the wrong column count"),label));
             for (const auto &v : row) s.z.push_back(number(v, label + ".z"));
         }
-    } else invalid(label + ": unsupported surface type " + type);
+        const auto bounds = std::minmax_element(s.z.begin(),s.z.end());
+        s.min_z = *bounds.first; s.max_z = *bounds.second;
+    } else invalid(Slic3r::format(_u8L("%1%: unsupported surface type %2%"),label,type));
     return s;
 }
 } // namespace
@@ -66,17 +70,18 @@ LayerStack LayerStack::parse(const std::string &text)
     LayerStack out;
     try {
         const Json j = Json::parse(text);
-        if (j.at("format") != "orca_nonplanar_layers") invalid("unknown format");
-        if (!j.at("version").is_number_integer() || j.at("version") != 1) invalid("version must be 1");
-        if (j.at("units") != "mm") invalid("units must be mm");
-        if (j.at("coordinate_system") != "plate_world_xyz") invalid("coordinate_system must be plate_world_xyz");
-        if (!j.at("plate_index").is_number_integer() || j.at("plate_index").get<int>() < 0)
-            invalid("plate_index must be a nonnegative integer");
+        if (j.at("format") != "orca_nonplanar_layers") invalid(_u8L("unknown format"));
+        if (!j.at("version").is_number_integer() || j.at("version") != 1) invalid(_u8L("version must be 1"));
+        if (j.at("units") != "mm") invalid(_u8L("units must be mm"));
+        if (j.at("coordinate_system") != "plate_world_xyz") invalid(_u8L("coordinate_system must be plate_world_xyz"));
+        if (!j.at("plate_index").is_number_integer() || j.at("plate_index") < 0 ||
+            j.at("plate_index") > std::numeric_limits<int>::max())
+            invalid(_u8L("plate_index must be a nonnegative integer within the supported plate-number range"));
         out.plate_index = j.at("plate_index").get<int>();
         out.x = axis(j.at("grid").at("x"), "x");
         out.y = axis(j.at("grid").at("y"), "y");
         out.bed = surface(j.at("bed"), out.x.size(), out.y.size(), "bed");
-        if (!out.bed.plane) invalid("bed must be a plane");
+        if (!out.bed.plane) invalid(_u8L("bed must be a plane"));
         const auto &l = j.at("limits");
         out.limits = {number(l.at("geometry_tolerance_mm"), "geometry_tolerance_mm"),
                       number(l.at("path_chord_tolerance_mm"), "path_chord_tolerance_mm"),
@@ -87,13 +92,13 @@ LayerStack LayerStack::parse(const std::string &text)
         const auto &lim = out.limits;
         if (lim.geometry_tolerance < 1e-5 || lim.chord_tolerance < 1e-5 || lim.max_segment_length <= 0 ||
             lim.min_gap <= 0 || lim.max_gap < lim.min_gap || lim.max_slope_degrees <= 0 || lim.max_slope_degrees >= 90)
-            invalid("tolerances must be >= 0.00001 mm, lengths/gaps positive, min gap <= max gap, and slope in (0,90) degrees");
+            invalid(_u8L("tolerances must be >= 0.00001 mm, lengths/gaps positive, min gap <= max gap, and slope in (0,90) degrees"));
         const auto &layers = j.at("layers");
-        if (!layers.is_array() || layers.empty()) invalid("layers must be a nonempty array");
+        if (!layers.is_array() || layers.empty()) invalid(_u8L("layers must be a nonempty array"));
         for (size_t k = 0; k < layers.size(); ++k) {
             const auto &entry = layers[k];
             if (!entry.at("id").is_number_integer() || entry.at("id").get<long long>() != static_cast<long long>(k))
-                invalid("layer IDs must be consecutive from zero");
+                invalid(_u8L("layer IDs must be consecutive from zero"));
             out.layers.push_back(surface(entry.at("surface"), out.x.size(), out.y.size(), "layer " + std::to_string(k)));
         }
         const double slope = std::tan(lim.max_slope_degrees * std::acos(-1.) / 180.);
@@ -106,13 +111,12 @@ LayerStack LayerStack::parse(const std::string &text)
                                        XY{out.x[i],out.y[j+1]}, XY{out.x[i+1],out.y[j+1]}}) {
                         const double gap = patch.value(p) - below.value(p);
                         if (!std::isfinite(gap) || gap < lim.min_gap-1e-10 || gap > lim.max_gap+1e-10)
-                            invalid("layer " + std::to_string(k) + ": vertical gap outside limits at grid cell " +
-                                    std::to_string(i) + "," + std::to_string(j));
+                            invalid(Slic3r::format(_u8L("Layer %1%: vertical gap outside limits at grid cell %2%,%3%"),k,i,j));
                         const XY g = patch.gradient(p);
                         // Norm of an affine gradient is convex; its maximum over a rectangle
                         // is attained at a corner, including both sides of grid seams.
                         if (!std::isfinite(g.x) || !std::isfinite(g.y) || std::hypot(g.x,g.y) > slope+1e-10)
-                            invalid("layer " + std::to_string(k) + ": interpolated slope exceeds limit");
+                            invalid(Slic3r::format(_u8L("Layer %1%: interpolated slope exceeds limit"),k));
                     }
                 }
         }
@@ -124,7 +128,7 @@ LayerStack LayerStack::parse(const std::string &text)
 LayerStack LayerStack::read(const std::string &filename)
 {
     std::ifstream file(std::filesystem::u8path(filename), std::ios::binary);
-    if (!file) invalid("cannot open " + filename);
+    if (!file) invalid(Slic3r::format(_u8L("Cannot open %1%"),filename));
     return parse(std::string(std::istreambuf_iterator<char>(file), {}));
 }
 
@@ -133,7 +137,7 @@ bool LayerStack::covers(XY p) const
 
 std::pair<size_t,size_t> LayerStack::cell(XY p) const
 {
-    if (!covers(p)) invalid("model or path outside shared grid at " + std::to_string(p.x) + "," + std::to_string(p.y));
+    if (!covers(p)) invalid(Slic3r::format(_u8L("Model or path outside shared grid at %1%,%2%"),p.x,p.y));
     const size_t i = std::min(size_t(std::upper_bound(x.begin(),x.end(),p.x)-x.begin()-1),x.size()-2);
     const size_t j = std::min(size_t(std::upper_bound(y.begin(),y.end(),p.y)-y.begin()-1),y.size()-2);
     return {i,j};
@@ -155,8 +159,7 @@ XY LayerStack::gradient(const Surface &s, XY p) const
 std::pair<double,double> LayerStack::bounds(const Surface &s) const
 {
     if (!s.plane) {
-        const auto [lo,hi] = std::minmax_element(s.z.begin(),s.z.end());
-        return {*lo,*hi};
+        return {s.min_z,s.max_z};
     }
     double lo = std::numeric_limits<double>::infinity(), hi = -lo;
     for (double py : {y.front(),y.back()}) for (double px : {x.front(),x.back()}) {
@@ -216,7 +219,7 @@ double LayerStack::normal_spacing(size_t k, XY p) const
         std::sort(roots.begin(),roots.end());
         for (double u : roots) if (u >= -1e-10 && u <= 1.+1e-10 && t0+u*span > 0.) return t0+u*span;
     }
-    invalid("downward normal does not reach the preceding surface within the shared grid; enlarge the domain or redesign the stack");
+    invalid(_u8L("downward normal does not reach the preceding surface within the shared grid; enlarge the domain or redesign the stack"));
 }
 
 } // namespace Slic3r::Nonplanar

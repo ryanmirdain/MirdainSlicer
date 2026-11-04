@@ -24,6 +24,7 @@ struct Surface {
     bool plane = true;
     double a = 0., b = 0., c = 0.;
     std::vector<double> z; // row-major, shared grid
+    double min_z = 0., max_z = 0.; // derived grid bounds; input surfaces are immutable
 };
 
 struct Limits {

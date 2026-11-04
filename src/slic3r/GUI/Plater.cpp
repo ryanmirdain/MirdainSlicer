@@ -21210,9 +21210,9 @@ void Plater::import_nonplanar_layers()
     try {
         const auto stack = Slic3r::Nonplanar::LayerStack::read(into_u8(dialog.GetPath()));
         if (stack.plate_index != get_partplate_list().get_curr_plate_index())
-            throw std::invalid_argument("Nonplanar plate_index must match the selected plate (zero-based)");
+            throw std::invalid_argument(_u8L("Nonplanar plate_index must match the selected plate (zero-based)"));
         background_process().stop();
-        take_snapshot(_L("Import nonplanar layers"));
+        take_snapshot(_u8L("Import nonplanar layers"));
         Slic3r::Nonplanar::attach(model(),stack);
         update(true,true);
         wxGetApp().mainframe->update_title();
@@ -21224,7 +21224,7 @@ void Plater::import_nonplanar_layers()
 void Plater::use_standard_layers()
 {
     background_process().stop();
-    take_snapshot(_L("Use standard layers"));
+    take_snapshot(_u8L("Use standard layers"));
     Slic3r::Nonplanar::detach(model());
     update(true,true);
     wxGetApp().mainframe->update_title();

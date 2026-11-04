@@ -160,3 +160,5 @@ Select aligned seams without scarf joints or staggered inner seams, and 100%
 skin densities. XY/hole/elephant-foot compensation must be zero; filament shrink
 compensation must be 100%. These settings would otherwise move original model
 material relative to the externally supplied surfaces.
+Set `top_shell_thickness` and `bottom_shell_thickness` to zero: this mode uses
+shell layer counts and rejects planar minimum-thickness overrides.

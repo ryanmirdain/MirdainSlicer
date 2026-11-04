@@ -1,4 +1,6 @@
 #include "Slicer.hpp"
+#include "../I18N.hpp"
+#include "../format.hpp"
 #include <clipper2/clipper.h>
 
 #include <algorithm>
@@ -13,7 +15,7 @@ namespace {
 using namespace Clipper2Lib;
 constexpr double scale = 1e6;
 constexpr double boundary_epsilon = 1e-8;
-[[noreturn]] void invalid(const std::string &s) { throw std::invalid_argument("Nonplanar slicing: " + s); }
+[[noreturn]] void invalid(const std::string &s) { throw std::invalid_argument(Slic3r::format(_u8L("Nonplanar slicing: %1%"),s)); }
 XY xy(XYZ p) { return {p.x,p.y}; }
 XYZ mix(XYZ a, XYZ b, double t)
 { return {a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t,a.z+(b.z-a.z)*t}; }
@@ -56,7 +58,7 @@ public:
         Paths64 uncovered;
         for (const auto &t : object.triangles)
             face(t,stack.layers.back(),stack.limits.geometry_tolerance,uncovered,true);
-        if (!uncovered.empty()) invalid("final supplied surface lies below the original mesh between vertices");
+        if (!uncovered.empty()) invalid(_u8L("final supplied surface lies below the original mesh between vertices"));
     }
 
     // Positive/negative projected face winding implements an upward vertical ray
@@ -103,7 +105,7 @@ private:
     void refine(std::array<XYZ,3> t, const Patch &h, double shift, Paths64 &out, bool positive, unsigned depth = 0)
     {
         if ((++nodes & 4095) == 0) cancel();
-        if (nodes > 20000000) invalid("intersection refinement budget exceeded; simplify the layer grid or relax geometry_tolerance_mm");
+        if (nodes > 20000000) invalid(_u8L("intersection refinement budget exceeded; simplify the layer grid or relax geometry_tolerance_mm"));
         auto f = [&](XYZ p) { return p.z-h.value(xy(p))-shift; };
         std::array<double,3> v {f(t[0]),f(t[1]),f(t[2])};
         std::array<XYZ,3> mid {mix(t[0],t[1],.5),mix(t[1],t[2],.5),mix(t[2],t[0],.5)};
@@ -141,7 +143,7 @@ private:
             append(polygon,out,positive);
             return;
         }
-        if (depth == 48) invalid("intersection did not converge within geometry tolerance");
+        if (depth == 48) invalid(_u8L("intersection did not converge within geometry tolerance"));
         const size_t a = longest, b = (a+1)%3, c = (a+2)%3;
         refine({t[a],mid[a],t[c]},h,shift,out,positive,depth+1);
         refine({mid[a],t[b],t[c]},h,shift,out,positive,depth+1);
@@ -268,30 +270,35 @@ private:
         const XYZ p {a.x,a.y,stack.value(stack.layers[k],a)}, q {b.x,b.y,stack.value(stack.layers[k],b)};
         const double zm = stack.value(stack.layers[k],mid), gap = stack.vertical_gap(k,mid);
         const double ga = stack.vertical_gap(k,a), gb = stack.vertical_gap(k,b);
-        if (std::max({ga,gb,gap}) > settings.nozzle_diameter)
-            invalid("local vertical gap exceeds the nozzle diameter");
+        if (std::max({ga,gb,gap}) > settings.nozzle_diameter+1e-10)
+            invalid(_u8L("local vertical gap exceeds the nozzle diameter"));
         const double chord_error = std::abs(zm-(p.z+q.z)*.5);
         // Include the cross-width surface variation in the modeled bead top:
         // the emitted centerline is on H; the ideal band envelope follows H.
         if (distance(p,q) > stack.limits.max_segment_length-.00018 || chord_error > stack.limits.chord_tolerance*.5 ||
             std::max(std::abs(ga-gap),std::abs(gb-gap)) > .01*gap) {
-            if (depth == 40) invalid("path/flow segmentation did not converge");
+            if (depth == 40) invalid(_u8L("path/flow segmentation did not converge"));
             segment(out,a,mid,k,depth+1); segment(out,mid,b,k,depth+1); return;
         }
         const double ds = std::hypot(b.x-a.x,b.y-a.y);
         if (ds < 1e-10) return;
+        const double normal = stack.normal_spacing(k,mid), na = stack.normal_spacing(k,a), nb = stack.normal_spacing(k,b);
+        for (double spacing : {na,normal,nb})
+            if ((settings.min_normal_height > 0. && spacing < settings.min_normal_height-1e-10) ||
+                (settings.max_normal_height > 0. && spacing > settings.max_normal_height+1e-10))
+                invalid(_u8L("local normal spacing exceeds the nozzle profile's layer-height limits"));
+        if (std::max(std::abs(na-normal),std::abs(nb-normal)) > .01*normal) {
+            if (depth == 40) invalid(_u8L("normal-spacing segmentation did not converge"));
+            segment(out,a,mid,k,depth+1); segment(out,mid,b,k,depth+1); return;
+        }
         const XY grad = stack.gradient(stack.layers[k],mid);
         const double cross_slope = (-grad.x*(b.y-a.y)+grad.y*(b.x-a.x))/ds;
         double preview_error;
         const double volume = strip_volume(a,b,k,preview_error);
         if (preview_error > stack.limits.geometry_tolerance*.5) {
-            if (depth >= 24) invalid("line width cannot represent transverse surface curvature/thickness within geometry tolerance; use a narrower line or a larger tolerance");
+            if (depth >= 24) invalid(_u8L("line width cannot represent transverse surface curvature/thickness within geometry tolerance; use a narrower line or a larger tolerance"));
             segment(out,a,mid,k,depth+1); segment(out,mid,b,k,depth+1); return;
         }
-        const double normal = stack.normal_spacing(k,mid);
-        if ((settings.min_normal_height > 0. && normal < settings.min_normal_height) ||
-            (settings.max_normal_height > 0. && normal > settings.max_normal_height))
-            invalid("local normal spacing exceeds the nozzle profile's layer-height limits");
         out.segments.push_back({q,volume,gap,normal,settings.width*std::sqrt(1.+cross_slope*cross_slope),-cross_slope});
     }
 };
@@ -323,14 +330,14 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
                          const std::function<void()> &cancel)
 {
     if (settings.walls < 1 || settings.width <= 0 || settings.density < 0 || settings.density > 1)
-        invalid("at least one wall, a positive line width and density in [0,1] are required");
+        invalid(_u8L("at least one wall, a positive line width and density in [0,1] are required"));
     const double tol = stack.limits.geometry_tolerance;
     for (const Object &object : objects) for (const Triangle &t : object.triangles) for (XYZ p : t.vertices) {
-        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) invalid("model contains nonfinite coordinates");
-        if (!stack.covers(xy(p))) invalid("shared grid does not cover the placed model footprint");
-        if (p.z < stack.value(stack.bed,xy(p))-tol) invalid("model extends below the supplied bed");
-        if (p.z > settings.max_z+tol) invalid("model exceeds machine Z height");
-        if (p.z > stack.value(stack.layers.back(),xy(p))+tol) invalid("layer stack does not cover the complete model height");
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) invalid(_u8L("model contains nonfinite coordinates"));
+        if (!stack.covers(xy(p))) invalid(_u8L("shared grid does not cover the placed model footprint"));
+        if (p.z < stack.value(stack.bed,xy(p))-tol) invalid(_u8L("model extends below the supplied bed"));
+        if (p.z > settings.max_z+tol) invalid(_u8L("model exceeds machine Z height"));
+        if (p.z > stack.value(stack.layers.back(),xy(p))+tol) invalid(_u8L("layer stack does not cover the complete model height"));
     }
     std::vector<Layer> output(stack.layers.size());
     std::vector<Paths64> occupied(stack.layers.size());
@@ -342,7 +349,7 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
             cancel();
             Intersection engine(stack,cancel);
             bands.push_back(engine.band(object,k));
-            if (!intersect(occupied[k],bands.back()).empty()) invalid("overlapping printable objects are unsupported");
+            if (!intersect(occupied[k],bands.back()).empty()) invalid(_u8L("overlapping printable objects are unsupported"));
             occupied[k].insert(occupied[k].end(),bands.back().begin(),bands.back().end());
         }
         for (size_t k = 0; k < bands.size(); ++k) {
@@ -351,7 +358,7 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
             const double margin = settings.width*.5+tol;
             Paths64 safe = inset(bands[k],margin,tol);
             if (k > 0 && !difference(safe,bands[k-1]).empty())
-                invalid("unsupported overhang or floating island requires bridging/support, which is unavailable in nonplanar mode");
+                invalid(_u8L("unsupported overhang or floating island requires bridging/support, which is unavailable in nonplanar mode"));
             for (int wall = 0; wall < settings.walls; ++wall) {
                 const auto contours = inset(safe,wall*settings.width,tol);
                 for (const auto &p : contours) if (p.size() >= 3)
@@ -384,7 +391,7 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
         }
     }
     if (std::none_of(output.begin(),output.end(),[](const Layer &l) { return !l.paths.empty(); }))
-        invalid("no printable bead fits in the supplied material bands");
+        invalid(_u8L("no printable bead fits in the supplied material bands"));
     for (Layer &layer : output) if (!layer.paths.empty()) {
         layer.min_z = std::numeric_limits<double>::infinity(); layer.max_z = -layer.min_z;
         auto add = [&](XYZ p) { layer.min_z = std::min(layer.min_z,p.z); layer.max_z = std::max(layer.max_z,p.z); };
@@ -392,7 +399,7 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
             add(path.start);
             for (const auto &segment : path.segments) add(segment.end);
         }
-        if (layer.min_z < 0. || layer.max_z > settings.max_z) invalid("generated path exceeds machine Z limits");
+        if (layer.min_z < 0. || layer.max_z > settings.max_z) invalid(_u8L("generated path exceeds machine Z limits"));
     }
     return output;
 }

@@ -3341,13 +3341,24 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 {
     if (nonplanar()) {
         if (time_cost_with_cache) *time_cost_with_cache = 0;
-        if (use_cache) throw std::invalid_argument("Nonplanar slicing does not support planar slice caches");
+        if (use_cache) throw std::invalid_argument(_u8L("Nonplanar slicing does not support planar slice caches"));
         m_nonplanar_job.reset();
         this->set_status(5, L("Slicing supplied nonplanar layers"));
+        m_wipe_tower_data.clear();
+        m_skirt.clear();
+        m_skirt_brim_groups.clear();
+        m_has_shared_per_object_skirt = false;
+        m_skirt_convex_hull.clear();
+        m_first_layer_convex_hull.points.clear();
+        m_brimMap.clear();
+        m_brimMapByInstance.clear();
+        m_brimFilamentMap.clear();
+        m_objectBrimAreasByInstance.clear();
         for (PrintObject *object : m_objects) object->clear_shared_object();
         for (PrintObject *object : m_objects) {
             object->clear_support_layers();
             object->clear_layers();
+            object->m_skirt.clear();
         }
         m_nonplanar_job = Nonplanar::prepare(*this,m_nonplanar_source);
         // These milestones now refer to the native nonplanar job. No scalar-Z
@@ -4077,7 +4088,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 std::string Print::export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
     if (nonplanar()) {
-        if (!m_nonplanar_job) throw std::logic_error("Generate nonplanar paths before exporting G-code");
+        if (!m_nonplanar_job) throw std::logic_error(_u8L("Generate nonplanar paths before exporting G-code"));
         const std::string path = Nonplanar::export_gcode(*this,*m_nonplanar_job,this->output_filepath(path_template),result);
         if (this->set_started(psGCodeExport)) this->set_done(psGCodeExport);
         return path;
@@ -6745,7 +6756,7 @@ static void from_json(const json& j, groupedVolumeSlices& firstlayer_group)
 
 int Print::export_cached_data(const std::string& directory, bool with_space)
 {
-    if (nonplanar()) throw std::invalid_argument("Nonplanar jobs cannot export planar slice caches");
+    if (nonplanar()) throw std::invalid_argument(_u8L("Nonplanar jobs cannot export planar slice caches"));
     int ret = 0;
     boost::filesystem::path directory_path(directory);
 
@@ -7014,7 +7025,7 @@ int Print::export_cached_data(const std::string& directory, bool with_space)
 
 int Print::load_cached_data(const std::string& directory)
 {
-    if (nonplanar()) throw std::invalid_argument("Nonplanar jobs cannot load planar slice caches");
+    if (nonplanar()) throw std::invalid_argument(_u8L("Nonplanar jobs cannot load planar slice caches"));
     int ret = 0;
     boost::filesystem::path directory_path(directory);
 
