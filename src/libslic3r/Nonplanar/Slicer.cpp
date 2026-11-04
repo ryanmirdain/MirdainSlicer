@@ -7,6 +7,8 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -21,11 +23,8 @@ XYZ mix(XYZ a, XYZ b, double t)
 { return {a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t,a.z+(b.z-a.z)*t}; }
 double distance(XYZ a, XYZ b)
 { return std::hypot(std::hypot(a.x-b.x,a.y-b.y),a.z-b.z); }
-double area(XYZ a, XYZ b, XYZ c)
-{ return (b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x); }
 Point64 point(XY p) { return {std::llround(p.x*scale),std::llround(p.y*scale)}; }
 XY real(Point64 p) { return {p.x/scale,p.y/scale}; }
-Paths64 unite(const Paths64 &p) { return Union(p,FillRule::NonZero); }
 Paths64 intersect(const Paths64 &a, const Paths64 &b) { return Intersect(a,b,FillRule::NonZero); }
 Paths64 difference(const Paths64 &a, const Paths64 &b) { return Difference(a,b,FillRule::NonZero); }
 Paths64 inset(const Paths64 &p, double d, double tolerance)
@@ -49,35 +48,33 @@ std::vector<XYZ> clip_axis(const std::vector<XYZ> &polygon, int axis, double val
     return out;
 }
 
-double band_volume(const std::vector<XYZ> &polygon, const Patch &top, const Patch &bottom)
-{
-    const XY origin = xy(polygon.front());
-    const XY gt = top.gradient(origin), gb = bottom.gradient(origin);
-    double area = 0., mx = 0., my = 0., mxy = 0.;
-    for (size_t n = 0; n < polygon.size(); ++n) {
-        const XY p {polygon[n].x-origin.x,polygon[n].y-origin.y};
-        const XYZ next = polygon[(n+1)%polygon.size()];
-        const XY q {next.x-origin.x,next.y-origin.y};
-        const double cross = p.x*q.y-q.x*p.y;
-        area += cross*.5; mx += (p.x+q.x)*cross/6.; my += (p.y+q.y)*cross/6.;
-        mxy += (2.*p.x*p.y+p.x*q.y+q.x*p.y+2.*q.x*q.y)*cross/24.;
-    }
-    return (top.value(origin)-bottom.value(origin))*area+(gt.x-gb.x)*mx+(gt.y-gb.y)*my+(top.axy-bottom.axy)*mxy;
-}
-
+// A mesh face intersected with a bilinear height patch has the XY equation
+// A + B*u + C*v + D*u*v = 0. Trace that curve, not triangle subdivisions.
 class Intersection {
+    struct Piece {
+        std::vector<XYZ> polygon;
+        XYZ normal;
+        double min_z, max_z;
+    };
+    const LayerStack &stack;
+    const std::function<void()> &cancel;
+    std::vector<std::vector<Piece>> cells;
+
+    static XYZ cross(XYZ a, XYZ b)
+    { return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x}; }
+    static XYZ subtract(XYZ a, XYZ b) { return {a.x-b.x,a.y-b.y,a.z-b.z}; }
+    static double dot(XYZ a, XYZ b) { return a.x*b.x+a.y*b.y+a.z*b.z; }
+
 public:
     Intersection(const LayerStack &s, const Object &object, const std::function<void()> &c)
-        : stack(s), cancel(c), cells((s.x.size()-1)*(s.y.size()-1)), face_count(object.triangles.size()), faces(face_count)
+        : stack(s), cancel(c), cells((s.x.size()-1)*(s.y.size()-1))
     {
-        for (size_t face_id = 0; face_id < object.triangles.size(); ++face_id) {
+        for (const Triangle &t : object.triangles) {
             cancel();
-            const auto &t = object.triangles[face_id];
-            if (std::abs(area(t.vertices[0],t.vertices[1],t.vertices[2])) < 1e-16) continue;
-            auto &face = faces[face_id];
-            face.min_z = std::min({t.vertices[0].z,t.vertices[1].z,t.vertices[2].z});
-            face.max_z = std::max({t.vertices[0].z,t.vertices[1].z,t.vertices[2].z});
-            for (XYZ p : t.vertices) face.projection.push_back(point(xy(p)));
+            XYZ normal = cross(subtract(t.vertices[1],t.vertices[0]),subtract(t.vertices[2],t.vertices[0]));
+            const double length = std::sqrt(dot(normal,normal));
+            if (length < 1e-16) continue;
+            normal = {normal.x/length,normal.y/length,normal.z/length};
             double xmin = t.vertices[0].x, xmax = xmin, ymin = t.vertices[0].y, ymax = ymin;
             for (XYZ p : t.vertices) {
                 xmin = std::min(xmin,p.x); xmax = std::max(xmax,p.x);
@@ -89,200 +86,192 @@ public:
                 std::vector<XYZ> polygon(t.vertices.begin(),t.vertices.end());
                 polygon = clip_axis(polygon,0,stack.x[i],true); polygon = clip_axis(polygon,0,stack.x[i+1],false);
                 polygon = clip_axis(polygon,1,stack.y[j],true); polygon = clip_axis(polygon,1,stack.y[j+1],false);
-                for (size_t n = 1; n+1 < polygon.size(); ++n) {
-                    Piece piece {{polygon[0],polygon[n],polygon[n+1]},face_id};
-                    if (std::abs(area(piece.triangle[0],piece.triangle[1],piece.triangle[2])) < 1e-16) continue;
-                    piece.min_z = std::min({piece.triangle[0].z,piece.triangle[1].z,piece.triangle[2].z});
-                    piece.max_z = std::max({piece.triangle[0].z,piece.triangle[1].z,piece.triangle[2].z});
-                    for (XYZ p : piece.triangle) piece.projection.push_back(point(xy(p)));
-                    if (std::abs(Area(piece.projection)) < 1.) continue;
-                    cells[j*(stack.x.size()-1)+i].push_back(std::move(piece));
+                if (polygon.size() < 3) continue;
+                XYZ sum {0.,0.,0.};
+                for (size_t v = 1; v+1 < polygon.size(); ++v) {
+                    const XYZ c = cross(subtract(polygon[v],polygon[0]),subtract(polygon[v+1],polygon[0]));
+                    sum = {sum.x+c.x,sum.y+c.y,sum.z+c.z};
                 }
+                if (dot(sum,sum) < 1e-24) continue;
+                double lo = polygon.front().z, hi = lo;
+                for (XYZ p : polygon) { lo = std::min(lo,p.z); hi = std::max(hi,p.z); }
+                cells[j*(stack.x.size()-1)+i].push_back({std::move(polygon),normal,lo,hi});
             }
         }
         for (auto &cell : cells)
             std::sort(cell.begin(),cell.end(),[](const Piece &a, const Piece &b) { return a.max_z < b.max_z; });
     }
 
-    void require_coverage()
+    Paths64 cross_section(const Surface &below, const Surface &above)
     {
-        nodes = 0;
-        Paths64 uncovered;
-        visit(stack.layers.back(),stack.limits.geometry_tolerance,[&](const Piece &p, const Patch &h, double low, double high) {
-            if (p.max_z < low) return;
-            if (p.min_z >= high) append({p.triangle.begin(),p.triangle.end()},uncovered,true);
-            else refine(p.triangle,h,stack.limits.geometry_tolerance,uncovered,true);
-        });
-        if (!uncovered.empty()) invalid(_u8L("final supplied surface lies below the original mesh between vertices"));
-    }
-
-    struct SurfaceRegions {
-        Paths64 material;
-        std::vector<Paths64> faces;
-    };
-
-    std::array<SurfaceRegions,2> surface_regions(const Surface &surface)
-    {
-        std::array<SurfaceRegions,2> results;
-        std::array<Paths64,2> signed_faces;
-        for (auto &result : results) result.faces.resize(face_count);
-        // Whole-face bounds apply to every surface shape. Fully above faces
-        // contribute their original projection without revisiting grid pieces.
-        const auto [minimum,maximum] = stack.bounds(surface);
-        std::vector<bool> settled(face_count,false);
-        bool crossing = false;
-        for (size_t n = 0; n < face_count; ++n) {
-            const auto &face = faces[n];
-            if (face.projection.empty() || face.max_z < minimum-boundary_epsilon) settled[n] = true;
-            else if (face.min_z >= maximum+boundary_epsilon) {
-                for (size_t side = 0; side < 2; ++side) {
-                    results[side].faces[n].push_back(face.projection);
-                    signed_faces[side].push_back(face.projection);
-                }
-                settled[n] = true;
-            } else crossing = true;
-        }
-        nodes = 0;
-        if (crossing) visit(surface,-boundary_epsilon,[&](const Piece &p, const Patch &h, double low, double high) {
-            if (settled[p.face_id]) return;
-            for (size_t side = 0; side < 2; ++side) {
-                auto &paths = results[side].faces[p.face_id];
-                const double offset = side ? 2.*boundary_epsilon : 0.;
-                if (p.max_z < low+offset) continue;
-                if (p.min_z >= high+offset) {
-                    paths.push_back(p.projection);
-                    signed_faces[side].push_back(p.projection);
-                } else refine(p.triangle,h,side ? boundary_epsilon : -boundary_epsilon,
-                              signed_faces[side],false,0,&paths);
+        // Join curve segments just as a planar mesh slicer joins triangle cuts.
+        struct Node { XY p; std::vector<size_t> edges; };
+        struct Edge { size_t a,b; bool used = false; };
+        std::vector<Node> nodes;
+        std::vector<Edge> edges;
+        std::map<std::pair<int64_t,int64_t>,std::vector<size_t>> buckets;
+        std::set<std::pair<size_t,size_t>> unique;
+        constexpr double join = 2e-6;
+        auto node = [&](XY p) {
+            const int64_t x = std::llround(p.x/join), y = std::llround(p.y/join);
+            for (int dx = -1; dx <= 1; ++dx) for (int dy = -1; dy <= 1; ++dy) {
+                auto it = buckets.find({x+dx,y+dy});
+                if (it != buckets.end()) for (size_t n : it->second)
+                    if (std::hypot(nodes[n].p.x-p.x,nodes[n].p.y-p.y) <= join) return n;
             }
-        });
-        for (size_t side = 0; side < 2; ++side) {
-            auto &result = results[side];
-            for (auto &paths : result.faces)
-                for (auto &path : paths) if (!IsPositive(path)) std::reverse(path.begin(),path.end());
-            result.material = Union(signed_faces[side],FillRule::Positive);
-        }
-        return results;
-    }
-
-    Paths64 band(const SurfaceRegions &bottom, const SurfaceRegions &top)
-    {
-        Paths64 region = intersect(top.material,bottom.material), boundary;
-        for (size_t n = 0; n < face_count; ++n) {
-            if ((n & 4095) == 0) cancel();
-            if (bottom.faces[n].empty()) continue;
-            const auto between = top.faces[n].empty() ? bottom.faces[n] :
-                difference(unite(bottom.faces[n]),unite(top.faces[n]));
-            boundary.insert(boundary.end(),between.begin(),between.end());
-        }
-        return difference(region,unite(boundary));
-    }
-
-private:
-    struct Piece {
-        std::array<XYZ,3> triangle;
-        size_t face_id;
-        double min_z = 0., max_z = 0.;
-        Path64 projection;
-    };
-    const LayerStack &stack;
-    const std::function<void()> &cancel;
-    std::vector<std::vector<Piece>> cells;
-    size_t face_count;
-    struct FaceBounds { double min_z = 0., max_z = 0.; Path64 projection; };
-    std::vector<FaceBounds> faces;
-    size_t nodes = 0;
-
-    template<class Fn> void visit(const Surface &surface, double shift, Fn fn)
-    {
+            const size_t n = nodes.size();
+            nodes.push_back({p,{}}); buckets[{x,y}].push_back(n); return n;
+        };
+        auto line = [&](XY a, XY b) {
+            const size_t na = node(a), nb = node(b);
+            if (na == nb || !unique.insert(std::minmax(na,nb)).second) return;
+            nodes[na].edges.push_back(edges.size()); nodes[nb].edges.push_back(edges.size());
+            edges.push_back({na,nb});
+        };
         const size_t nx = stack.x.size()-1;
         for (size_t cell = 0; cell < cells.size(); ++cell) {
             cancel();
             if (cells[cell].empty()) continue;
             const size_t i = cell%nx, j = cell/nx;
-            const Patch h = stack.patch(surface,i,j);
+            const Patch lower = stack.patch(below,i,j), upper = stack.patch(above,i,j);
+            const Patch h {lower.x,lower.y,(lower.c+upper.c)*.5-boundary_epsilon,
+                           (lower.ax+upper.ax)*.5,(lower.ay+upper.ay)*.5,(lower.axy+upper.axy)*.5};
             const std::array<double,4> heights {h.value({stack.x[i],stack.y[j]}),h.value({stack.x[i+1],stack.y[j]}),
                 h.value({stack.x[i],stack.y[j+1]}),h.value({stack.x[i+1],stack.y[j+1]})};
-            const double low = *std::min_element(heights.begin(),heights.end())+shift;
-            const double high = *std::max_element(heights.begin(),heights.end())+shift;
-            const auto first = std::lower_bound(cells[cell].begin(),cells[cell].end(),low,
+            const double low = *std::min_element(heights.begin(),heights.end());
+            const double high = *std::max_element(heights.begin(),heights.end());
+            auto first = std::lower_bound(cells[cell].begin(),cells[cell].end(),low,
                 [](const Piece &p, double z) { return p.max_z < z; });
-            for (auto it = first; it != cells[cell].end(); ++it) fn(*it,h,low,high);
+            for (auto it = first; it != cells[cell].end(); ++it) {
+                const Piece &piece = *it;
+                if (piece.min_z > high) continue;
+                trace(piece,h,line);
+            }
         }
+        Paths64 loops;
+        for (size_t e = 0; e < edges.size(); ++e) {
+            if (edges[e].used) continue;
+            const size_t start = edges[e].a;
+            size_t current = start, next_edge = e;
+            Path64 path;
+            do {
+                path.push_back(point(nodes[current].p));
+                Edge &edge = edges[next_edge]; edge.used = true;
+                current = edge.a == current ? edge.b : edge.a;
+                if (current == start) break;
+                auto next = std::find_if(nodes[current].edges.begin(),nodes[current].edges.end(),
+                    [&](size_t n) { return !edges[n].used; });
+                if (next == nodes[current].edges.end())
+                    invalid(_u8L("mesh intersection contains an open contour"));
+                next_edge = *next;
+            } while (current != start);
+            if (path.size() >= 3) loops.push_back(std::move(path));
+        }
+        return Union(loops,FillRule::EvenOdd);
     }
 
-    void append(const std::vector<XYZ> &vertices, Paths64 &out, bool positive)
+private:
+    template<class Emit> void trace(const Piece &piece, const Patch &h, Emit emit)
     {
-        Path64 polygon;
-        for (XYZ p : vertices) polygon.push_back(point(xy(p)));
-        if (polygon.size() < 3 || std::abs(Area(polygon)) < 1.) return;
-        if (positive && !IsPositive(polygon)) std::reverse(polygon.begin(),polygon.end());
-        out.push_back(std::move(polygon));
-    }
-
-    void refine(std::array<XYZ,3> t, const Patch &h, double shift, Paths64 &out, bool positive,
-                unsigned depth = 0, Paths64 *boundary = nullptr)
-    {
-        if ((++nodes & 4095) == 0) cancel();
-        if (nodes > 20000000) invalid(_u8L("intersection refinement budget exceeded; simplify the layer grid or relax geometry_tolerance_mm"));
-        auto f = [&](XYZ p) { return p.z-h.value(xy(p))-shift; };
-        std::array<double,3> v {f(t[0]),f(t[1]),f(t[2])};
-        std::array<XYZ,3> mid {mix(t[0],t[1],.5),mix(t[1],t[2],.5),mix(t[2],t[0],.5)};
-        std::array<double,3> edge {};
-        double lo = *std::min_element(v.begin(),v.end()), hi = *std::max_element(v.begin(),v.end());
-        double error = 0.;
-        for (size_t e = 0; e < 3; ++e) {
-            // Degree-two Bernstein control values bound the full quadratic on
-            // this triangle, including same-sign vertex crossings and tangencies.
-            const double linear = .5*(v[e]+v[(e+1)%3]);
-            edge[e] = 2.*f(mid[e])-linear;
-            lo = std::min(lo,edge[e]); hi = std::max(hi,edge[e]);
-            error = std::max(error,std::abs(edge[e]-linear));
-        }
-        if (lo >= 0.) {
-            append({t.begin(),t.end()},out,positive);
-            if (boundary) append({t.begin(),t.end()},*boundary,true);
-            return;
-        }
-        if (hi < 0.) return;
-        size_t longest = 0;
-        double length = 0.;
-        for (size_t e = 0; e < 3; ++e) {
-            const double d = std::hypot(t[e].x-t[(e+1)%3].x,t[e].y-t[(e+1)%3].y);
-            if (d > length) { length = d; longest = e; }
-        }
-        if (error < 1e-12 || length <= stack.limits.geometry_tolerance*.5) {
-            // Linear clipping on a bounded local patch. Positive and negative
-            // winding use opposite conservative sides of the residual bound.
-            auto clipped = [&](double margin) {
-                std::vector<XYZ> polygon;
-                XYZ a = t.back(); double fa = v.back()-margin;
-                for (size_t e = 0; e < 3; ++e) {
-                    XYZ b = t[e]; const double fb = v[e]-margin;
-                    if ((fa >= 0) != (fb >= 0)) polygon.push_back(mix(a,b,fa/(fa-fb)));
-                    if (fb >= 0) polygon.push_back(b);
-                    a = b; fa = fb;
-                }
-                return polygon;
+        std::vector<XYZ> hits;
+        auto add = [&](XYZ p) {
+            for (XYZ q : hits) if (distance(p,q) < 1e-8) return;
+            hits.push_back(p);
+        };
+        for (size_t n = 0; n < piece.polygon.size(); ++n) {
+            const XYZ a = piece.polygon[n], b = piece.polygon[(n+1)%piece.polygon.size()];
+            auto f = [&](double t) { XYZ p = mix(a,b,t); return p.z-h.value(xy(p)); };
+            const double c = f(0.), end = f(1.), mid = f(.5);
+            const double qa = 2.*(end+c-2.*mid), qb = end-c-qa;
+            auto root = [&](double t) {
+                if (t >= -1e-10 && t <= 1.+1e-10) add(mix(a,b,std::clamp(t,0.,1.)));
             };
-            append(clipped(positive || area(t[0],t[1],t[2]) > 0. ? error : -error),out,positive);
-            // Material winding and projected boundary subtraction intentionally
-            // use different conservative sides for downward-facing triangles.
-            if (boundary) append(clipped(error),*boundary,true);
+            if (std::abs(c) < 1e-10) add(a);
+            if (std::abs(end) < 1e-10) add(b);
+            if (std::abs(qa) < 1e-13) {
+                if (std::abs(qb) > 1e-13) root(-c/qb);
+            } else {
+                const double discriminant = qb*qb-4.*qa*c;
+                if (discriminant >= 0.) {
+                    const double q = -.5*(qb+std::copysign(std::sqrt(discriminant),qb));
+                    if (q != 0.) { root(q/qa); root(c/q); }
+                    else root(-qb/(2.*qa));
+                }
+            }
+        }
+        if (hits.size() < 2) return;
+        const XYZ n = piece.normal, origin = piece.polygon.front();
+        const double A = n.x*(h.x-origin.x)+n.y*(h.y-origin.y)+n.z*(h.c-origin.z);
+        const double B = n.x+n.z*h.ax, C = n.y+n.z*h.ay, D = n.z*h.axy;
+        // Choose the graph direction with the greater boundary extent. Both
+        // directions describe the same conic; vertical faces remain supported.
+        double xmin = hits[0].x, xmax = xmin, ymin = hits[0].y, ymax = ymin;
+        for (XYZ p : hits) {
+            xmin = std::min(xmin,p.x); xmax = std::max(xmax,p.x);
+            ymin = std::min(ymin,p.y); ymax = std::max(ymax,p.y);
+        }
+        const bool along_x = xmax-xmin >= ymax-ymin;
+        const double linear = along_x ? B : C, denominator = along_x ? C : B;
+        auto coordinate = [&](XYZ p) { return along_x ? p.x-h.x : p.y-h.y; };
+        auto at = [&](double t) {
+            const double other = -(A+linear*t)/(denominator+D*t);
+            return along_x ? XY{h.x+t,h.y+other} : XY{h.x+other,h.y+t};
+        };
+        auto inside = [&](XY p) {
+            const XYZ q {p.x,p.y,h.value(p)};
+            for (size_t v = 0; v < piece.polygon.size(); ++v) {
+                const XYZ a = piece.polygon[v], b = piece.polygon[(v+1)%piece.polygon.size()];
+                if (dot(cross(subtract(b,a),subtract(q,a)),n) < -1e-8) return false;
+            }
+            return true;
+        };
+        // A factored conic consists of two straight branches. Handle each
+        // branch separately so the graph's removable pole does not lose a cut.
+        if (D != 0. && std::abs(A*D-B*C) <= 1e-14*(std::abs(A*D)+std::abs(B*C)+1e-20)) {
+            for (int axis = 0; axis < 2; ++axis) {
+                const double fixed = axis ? -B/D+h.y : -C/D+h.x;
+                std::vector<XYZ> branch;
+                for (XYZ p : hits)
+                    if (std::abs((axis ? p.y : p.x)-fixed) < 1e-7) branch.push_back(p);
+                std::sort(branch.begin(),branch.end(),[&](XYZ a, XYZ b) { return axis ? a.x < b.x : a.y < b.y; });
+                for (size_t v = 1; v < branch.size(); ++v) {
+                    const XY a = xy(branch[v-1]), b = xy(branch[v]);
+                    if (inside({(a.x+b.x)*.5,(a.y+b.y)*.5})) emit(a,b);
+                }
+            }
             return;
         }
-        if (depth == 48) invalid(_u8L("intersection did not converge within geometry tolerance"));
-        const size_t a = longest, b = (a+1)%3, c = (a+2)%3;
-        refine({t[a],mid[a],t[c]},h,shift,out,positive,depth+1,boundary);
-        refine({mid[a],t[b],t[c]},h,shift,out,positive,depth+1,boundary);
+        std::sort(hits.begin(),hits.end(),[&](XYZ a, XYZ b) { return coordinate(a) < coordinate(b); });
+        for (size_t v = 1; v < hits.size(); ++v) {
+            const double a = coordinate(hits[v-1]), b = coordinate(hits[v]);
+            if (b-a < 1e-10) continue;
+            if (D != 0. && -denominator/D > a && -denominator/D < b) continue;
+            const XY mid = at((a+b)*.5);
+            if (!std::isfinite(mid.x) || !std::isfinite(mid.y) || !inside(mid)) continue;
+            // Sample only the intersection curve. For this rational graph the
+            // maximum chord deviation occurs where its derivative matches the
+            // chord slope; evaluate that point rather than subdividing faces.
+            auto curve = [&](auto &&self, double ta, double tb, XY pa, XY pb, unsigned depth) -> void {
+                double split = (ta+tb)*.5;
+                const double da = denominator+D*ta, db = denominator+D*tb;
+                if (D != 0. && da*db > 0.)
+                    split = (std::copysign(std::sqrt(da*db),da)-denominator)/D;
+                const XY pm = at(split);
+                const double dx = pb.x-pa.x, dy = pb.y-pa.y;
+                const double length = std::hypot(dx,dy);
+                const double error = length ? std::abs(dx*(pm.y-pa.y)-dy*(pm.x-pa.x))/length : 0.;
+                if (error > stack.limits.geometry_tolerance*.25 && depth < 32) {
+                    self(self,ta,split,pa,pm,depth+1); self(self,split,tb,pm,pb,depth+1);
+                } else emit(pa,pb);
+            };
+            curve(curve,a,b,xy(hits[v-1]),xy(hits[v]),0);
+        }
     }
-
-
 };
 
 class Planner {
 public:
-    Planner(const LayerStack &s, const Settings &p) : stack(s), settings(p), deposited(s.layers.size(),std::vector<Paths64>((s.x.size()-1)*(s.y.size()-1))) {}
+    Planner(const LayerStack &s, const Settings &p) : stack(s), settings(p) {}
 
     Path path(const Path64 &points, bool closed, size_t k, Role role, uint64_t object_id)
     {
@@ -314,41 +303,16 @@ public:
 private:
     const LayerStack &stack;
     const Settings &settings;
-    std::vector<std::vector<Paths64>> deposited;
 
-    double account_volume(XY a, XY b, size_t k, double &projected_area)
+    double account_volume(XY a, XY b, size_t k, double &projected_area) const
     {
-        const double length = std::hypot(b.x-a.x,b.y-a.y), half = settings.width*.5;
-        const XY normal {-(b.y-a.y)/length*half,(b.x-a.x)/length*half};
-        Path64 strip {point({a.x+normal.x,a.y+normal.y}),point({a.x-normal.x,a.y-normal.y}),
-                      point({b.x-normal.x,b.y-normal.y}),point({b.x+normal.x,b.y+normal.y})};
-        projected_area = 0.;
-        const Surface &below = k ? stack.layers[k-1] : stack.bed;
-        const auto bounds = GetBounds(strip);
-        const auto [i0,j0] = stack.cell(real({bounds.left,bounds.top}));
-        const auto [i1,j1] = stack.cell(real({bounds.right,bounds.bottom}));
-        double volume = 0.;
-        for (size_t j = j0; j <= j1; ++j) for (size_t i = i0; i <= i1; ++i) {
-            const Path64 cell {point({stack.x[i],stack.y[j]}),point({stack.x[i+1],stack.y[j]}),
-                               point({stack.x[i+1],stack.y[j+1]}),point({stack.x[i],stack.y[j+1]})};
-            const auto footprint = intersect({strip},{cell});
-            if (footprint.empty()) continue;
-            auto &covered = deposited[k][j*(stack.x.size()-1)+i];
-            const auto clipped = covered.empty() ? footprint : difference(footprint,covered);
-            if (clipped.empty()) continue;
-            covered = Union(covered,clipped,FillRule::NonZero);
-            projected_area += Area(clipped)/(scale*scale);
-            const Patch top = stack.patch(stack.layers[k],i,j), bottom = stack.patch(below,i,j);
-            for (const auto &polygon : clipped) {
-                std::vector<XYZ> vertices;
-                vertices.reserve(polygon.size());
-                for (Point64 p : polygon) { const XY q = real(p); vertices.push_back({q.x,q.y,0.}); }
-                // Hole paths retain negative winding and subtract their volume.
-                volume += band_volume(vertices,top,bottom);
-            }
-        }
-        if (volume < 0.) invalid(_u8L("Bead-volume integration lost numerical precision"));
-        return volume;
+        const double length = std::hypot(b.x-a.x,b.y-a.y);
+        const XY mid {(a.x+b.x)*.5,(a.y+b.y)*.5};
+        // Within a grid cell the vertical gap along a straight XY segment is
+        // quadratic. Simpson integration is exact, with no bead-footprint booleans.
+        const double gap = (stack.vertical_gap(k,a)+4.*stack.vertical_gap(k,mid)+stack.vertical_gap(k,b))/6.;
+        projected_area = settings.width*length;
+        return projected_area*gap;
     }
 
     // Bound the complete projected strip, including transverse curvature and
@@ -488,30 +452,26 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
     Planner planner(stack,settings);
     for (const Object &object : objects) {
         Intersection engine(stack,object,cancel);
-        engine.require_coverage();
         bool object_has_paths = false;
         double object_volume = 0.;
-        std::vector<Paths64> bands;
-        auto bottom = std::move(engine.surface_regions(stack.bed)[1]);
+        std::vector<Paths64> sections;
         for (size_t k = 0; k < stack.layers.size(); ++k) {
             cancel();
-            auto surfaces = engine.surface_regions(stack.layers[k]);
-            bands.push_back(engine.band(bottom,surfaces[0]));
-            if (!intersect(occupied[k],bands.back()).empty()) invalid(_u8L("overlapping printable objects are unsupported"));
-            occupied[k].insert(occupied[k].end(),bands.back().begin(),bands.back().end());
-            if (k+1 < stack.layers.size())
-                bottom = std::move(surfaces[1]);
+            const Surface &below = k ? stack.layers[k-1] : stack.bed;
+            sections.push_back(engine.cross_section(below,stack.layers[k]));
+            if (!intersect(occupied[k],sections.back()).empty()) invalid(_u8L("overlapping printable objects are unsupported"));
+            occupied[k].insert(occupied[k].end(),sections.back().begin(),sections.back().end());
         }
-        for (size_t k = 0; k < bands.size(); ++k) {
+        for (size_t k = 0; k < sections.size(); ++k) {
             cancel();
             Layer &layer = output[k];
             const size_t first_object_path = layer.paths.size();
             const double margin = settings.width*.5+tol;
-            Paths64 safe = inset(bands[k],margin,tol);
+            Paths64 safe = inset(sections[k],margin,tol);
             if (!safe.empty() && !object_has_paths && k != 0)
                 invalid(_u8L("An object's first printable bead is above the bed; thin contacts or floating starts need unsupported support strategies"));
             object_has_paths = object_has_paths || !safe.empty();
-            if (k > 0 && !difference(safe,bands[k-1]).empty())
+            if (k > 0 && !difference(safe,sections[k-1]).empty())
                 invalid(_u8L("unsupported overhang or floating island requires bridging/support, which is unavailable in nonplanar mode"));
             for (int wall = 0; wall < settings.walls; ++wall) {
                 const auto contours = inset(safe,wall*settings.width,tol);
@@ -523,13 +483,13 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
             // bands, independently for each object and all its islands/holes.
             Paths64 top = interior, bottom = interior;
             for (int n = 1; n <= settings.top_layers; ++n) {
-                if (k+size_t(n) >= bands.size()) { top.clear(); break; }
-                top = intersect(top,bands[k+n]);
+                if (k+size_t(n) >= sections.size()) { top.clear(); break; }
+                top = intersect(top,sections[k+n]);
             }
             top = settings.top_layers ? difference(interior,top) : Paths64{};
             for (int n = 1; n <= settings.bottom_layers; ++n) {
                 if (size_t(n) > k) { bottom.clear(); break; }
-                bottom = intersect(bottom,bands[k-n]);
+                bottom = intersect(bottom,sections[k-n]);
             }
             bottom = settings.bottom_layers ? difference(interior,bottom) : Paths64{};
             const Paths64 bottom_only = difference(bottom,top), solid = Union(top,bottom,FillRule::NonZero);
@@ -537,8 +497,8 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
             auto fill = [&](const Paths64 &region, double spacing, Role role) {
                 // Flat-ended strip beads must overlap the innermost wall and
                 // the skin partition boundary. Dilation includes every grid
-                // line whose width covers the target; the safe band still
-                // protects original holes and the entire bead footprint.
+                // line whose width covers the target; clipping preserves the
+                // sampled cross-section boundary and its holes.
                 const auto expanded = InflatePaths(region,settings.width*.5*scale,Clipper2Lib::JoinType::Round,
                                                    Clipper2Lib::EndType::Polygon,2.,tol*scale/8.);
                 const auto centers = intersect(expanded,safe);
