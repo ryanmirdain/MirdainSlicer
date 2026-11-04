@@ -78,7 +78,7 @@ void reject_bool(const DynamicPrintConfig &c, const char *key)
 {
     const auto *option = c.option(key);
     if (!option) return;
-    const auto *values = dynamic_cast<const ConfigOptionBools*>(option);
+    const auto *values = dynamic_cast<const ConfigOptionVector<unsigned char>*>(option);
     const bool enabled = values ? std::any_of(values->values.begin(),values->values.end(),[](auto v) { return v != 0; }) : option->getBool();
     if (enabled) invalid(Slic3r::format(_u8L("%1% is unsupported; disable it explicitly"),key));
 }
