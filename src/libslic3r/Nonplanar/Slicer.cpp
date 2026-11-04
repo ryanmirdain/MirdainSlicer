@@ -124,6 +124,7 @@ public:
     std::array<SurfaceRegions,2> surface_regions(const Surface &surface)
     {
         std::array<SurfaceRegions,2> results;
+        std::array<Paths64,2> signed_faces;
         for (auto &result : results) result.faces.resize(face_count);
         // Whole-face bounds apply to every surface shape. Fully above faces
         // contribute their original projection without revisiting grid pieces.
@@ -134,7 +135,10 @@ public:
             const auto &face = faces[n];
             if (face.projection.empty() || face.max_z < minimum-boundary_epsilon) settled[n] = true;
             else if (face.min_z >= maximum+boundary_epsilon) {
-                for (auto &result : results) result.faces[n].push_back(face.projection);
+                for (size_t side = 0; side < 2; ++side) {
+                    results[side].faces[n].push_back(face.projection);
+                    signed_faces[side].push_back(face.projection);
+                }
                 settled[n] = true;
             } else crossing = true;
         }
@@ -145,17 +149,18 @@ public:
                 auto &paths = results[side].faces[p.face_id];
                 const double offset = side ? 2.*boundary_epsilon : 0.;
                 if (p.max_z < low+offset) continue;
-                if (p.min_z >= high+offset) paths.push_back(p.projection);
-                else refine(p.triangle,h,side ? boundary_epsilon : -boundary_epsilon,paths,false);
+                if (p.min_z >= high+offset) {
+                    paths.push_back(p.projection);
+                    signed_faces[side].push_back(p.projection);
+                } else refine(p.triangle,h,side ? boundary_epsilon : -boundary_epsilon,
+                              signed_faces[side],false,0,&paths);
             }
         });
-        for (auto &result : results) {
-            Paths64 signed_faces;
-            for (auto &paths : result.faces) {
-                signed_faces.insert(signed_faces.end(),paths.begin(),paths.end());
+        for (size_t side = 0; side < 2; ++side) {
+            auto &result = results[side];
+            for (auto &paths : result.faces)
                 for (auto &path : paths) if (!IsPositive(path)) std::reverse(path.begin(),path.end());
-            }
-            result.material = Union(signed_faces,FillRule::Positive);
+            result.material = Union(signed_faces[side],FillRule::Positive);
         }
         return results;
     }
@@ -215,7 +220,8 @@ private:
         out.push_back(std::move(polygon));
     }
 
-    void refine(std::array<XYZ,3> t, const Patch &h, double shift, Paths64 &out, bool positive, unsigned depth = 0)
+    void refine(std::array<XYZ,3> t, const Patch &h, double shift, Paths64 &out, bool positive,
+                unsigned depth = 0, Paths64 *boundary = nullptr)
     {
         if ((++nodes & 4095) == 0) cancel();
         if (nodes > 20000000) invalid(_u8L("intersection refinement budget exceeded; simplify the layer grid or relax geometry_tolerance_mm"));
@@ -233,7 +239,11 @@ private:
             lo = std::min(lo,edge[e]); hi = std::max(hi,edge[e]);
             error = std::max(error,std::abs(edge[e]-linear));
         }
-        if (lo >= 0.) { append({t.begin(),t.end()},out,positive); return; }
+        if (lo >= 0.) {
+            append({t.begin(),t.end()},out,positive);
+            if (boundary) append({t.begin(),t.end()},*boundary,true);
+            return;
+        }
         if (hi < 0.) return;
         size_t longest = 0;
         double length = 0.;
@@ -244,22 +254,27 @@ private:
         if (error < 1e-12 || length <= stack.limits.geometry_tolerance*.5) {
             // Linear clipping on a bounded local patch. Positive and negative
             // winding use opposite conservative sides of the residual bound.
-            const double margin = positive || area(t[0],t[1],t[2]) > 0. ? error : -error;
-            std::vector<XYZ> polygon;
-            XYZ a = t.back(); double fa = v.back()-margin;
-            for (size_t e = 0; e < 3; ++e) {
-                XYZ b = t[e]; const double fb = v[e]-margin;
-                if ((fa >= 0) != (fb >= 0)) polygon.push_back(mix(a,b,fa/(fa-fb)));
-                if (fb >= 0) polygon.push_back(b);
-                a = b; fa = fb;
-            }
-            append(polygon,out,positive);
+            auto clipped = [&](double margin) {
+                std::vector<XYZ> polygon;
+                XYZ a = t.back(); double fa = v.back()-margin;
+                for (size_t e = 0; e < 3; ++e) {
+                    XYZ b = t[e]; const double fb = v[e]-margin;
+                    if ((fa >= 0) != (fb >= 0)) polygon.push_back(mix(a,b,fa/(fa-fb)));
+                    if (fb >= 0) polygon.push_back(b);
+                    a = b; fa = fb;
+                }
+                return polygon;
+            };
+            append(clipped(positive || area(t[0],t[1],t[2]) > 0. ? error : -error),out,positive);
+            // Material winding and projected boundary subtraction intentionally
+            // use different conservative sides for downward-facing triangles.
+            if (boundary) append(clipped(error),*boundary,true);
             return;
         }
         if (depth == 48) invalid(_u8L("intersection did not converge within geometry tolerance"));
         const size_t a = longest, b = (a+1)%3, c = (a+2)%3;
-        refine({t[a],mid[a],t[c]},h,shift,out,positive,depth+1);
-        refine({mid[a],t[b],t[c]},h,shift,out,positive,depth+1);
+        refine({t[a],mid[a],t[c]},h,shift,out,positive,depth+1,boundary);
+        refine({mid[a],t[b],t[c]},h,shift,out,positive,depth+1,boundary);
     }
 
 
