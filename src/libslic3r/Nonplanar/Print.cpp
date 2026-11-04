@@ -75,12 +75,20 @@ double first(const DynamicPrintConfig &c, const char *key, double fallback)
     return o && !o->values.empty() ? o->values.front() : fallback;
 }
 void reject_bool(const DynamicPrintConfig &c, const char *key)
-{ if (c.has(key) && c.opt_bool(key)) invalid(Slic3r::format(_u8L("%1% is unsupported; disable it explicitly"),key)); }
+{
+    const auto *option = c.option(key);
+    if (!option) return;
+    const auto *values = dynamic_cast<const ConfigOptionBools*>(option);
+    const bool enabled = values ? std::any_of(values->values.begin(),values->values.end(),[](auto v) { return v != 0; }) : option->getBool();
+    if (enabled) invalid(Slic3r::format(_u8L("%1% is unsupported; disable it explicitly"),key));
+}
 void validate_config(const DynamicPrintConfig &c)
 {
-    for (const auto *key : {"enable_support","enable_prime_tower","spiral_mode","belt_printer", "enable_arc_fitting",
+    for (const auto *key : {"enable_support","enable_prime_tower","spiral_mode","belt_printer",
                            "enable_overhang_speed", "enable_wrapping_detection", "detect_thin_wall"})
         reject_bool(c,key);
+    if (c.opt_enum<ArcFittingMode>("enable_arc_fitting") != ArcFittingMode::Disabled)
+        invalid(_u8L("arc fitting is unsupported; disable it explicitly"));
     if (c.opt_serialize("sparse_infill_pattern") != "rectilinear") invalid(_u8L("sparse_infill_pattern must be rectilinear"));
     if (c.opt_serialize("wall_generator") != "classic") invalid(_u8L("wall_generator must be classic"));
     if (c.opt_serialize("seam_position") != "aligned" || c.opt_serialize("seam_slope_type") != "none")
