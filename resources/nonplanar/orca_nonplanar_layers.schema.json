@@ -24,7 +24,7 @@
         "max_segment_length_mm": {"$ref": "#/$defs/positive"},
         "min_vertical_gap_mm": {"type": "number", "minimum": 0, "description": "Zero disables fixed gap and preset thickness bounds; surfaces must remain strictly ordered."},
         "max_vertical_gap_mm": {"$ref": "#/$defs/positive"},
-        "max_slope_degrees": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 90}
+        "max_slope_degrees": {"type": "number", "minimum": 0, "exclusiveMaximum": 90, "description": "Zero disables the slope cap."}
       }
     },
     "layers": {
