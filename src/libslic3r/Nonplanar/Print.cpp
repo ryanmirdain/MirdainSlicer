@@ -223,6 +223,7 @@ std::shared_ptr<Job> prepare(Print &print, const std::string &text)
     std::vector<Object> objects;
     const Vec3d origin = print.get_plate_origin();
     Polygon bed_polygon = Polygon::new_scale(config.option<ConfigOptionPoints>("printable_area")->values);
+    bed_polygon.make_counter_clockwise();
     if (!polygon_is_convex(bed_polygon))
         invalid(_u8L("nonplanar travel currently requires a convex printable area"));
     for (const auto *po : print.objects()) {
