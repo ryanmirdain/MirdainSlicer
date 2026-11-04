@@ -123,8 +123,6 @@ void validate_config(const DynamicPrintConfig &c)
         invalid(_u8L("slicing pipeline plugins are unsupported"));
     if (c.has("post_process") && !c.option<ConfigOptionStrings>("post_process")->values.empty())
         invalid(_u8L("postprocessing scripts are unsupported"));
-    if (has_bed_exclude_volumes(c) || !c.option<ConfigOptionPoints>("bed_exclude_area")->values.empty())
-        invalid(_u8L("machine exclusion regions are not yet supported by nonplanar travel planning"));
     if (scalar(c,"z_offset",0.) != 0.) invalid(_u8L("z_offset must be zero; supply heights in physical plate coordinates"));
     for (auto key : {"before_layer_change_gcode","layer_change_gcode","time_lapse_gcode"})
         if (c.has(key) && !c.opt_string(key).empty()) invalid(Slic3r::format(_u8L("%1% is unsupported in nonplanar mode"),key));
