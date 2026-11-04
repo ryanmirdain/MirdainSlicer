@@ -314,7 +314,7 @@ private:
         const XYZ p {a.x,a.y,stack.value(stack.layers[k],a)}, q {b.x,b.y,stack.value(stack.layers[k],b)};
         const double zm = stack.value(stack.layers[k],mid), gap = stack.vertical_gap(k,mid);
         const double ga = stack.vertical_gap(k,a), gb = stack.vertical_gap(k,b);
-        if (std::max({ga,gb,gap}) > settings.nozzle_diameter+1e-10)
+        if (stack.limits.min_gap > 0. && std::max({ga,gb,gap}) > settings.nozzle_diameter+1e-10)
             invalid(_u8L("local vertical gap exceeds the nozzle diameter"));
         const double chord_error = std::abs(zm-(p.z+q.z)*.5);
         // Include the cross-width surface variation in the modeled bead top:

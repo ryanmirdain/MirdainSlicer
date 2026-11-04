@@ -91,8 +91,8 @@ LayerStack LayerStack::parse(const std::string &text)
                       number(l.at("max_slope_degrees"), "max_slope_degrees")};
         const auto &lim = out.limits;
         if (lim.geometry_tolerance < 1e-5 || lim.chord_tolerance < 1e-5 || lim.max_segment_length <= 0 ||
-            lim.min_gap <= 0 || lim.max_gap < lim.min_gap || lim.max_slope_degrees <= 0 || lim.max_slope_degrees >= 90)
-            invalid(_u8L("tolerances must be >= 0.00001 mm, lengths/gaps positive, min gap <= max gap, and slope in (0,90) degrees"));
+            lim.min_gap < 0 || lim.max_gap < lim.min_gap || lim.max_slope_degrees <= 0 || lim.max_slope_degrees >= 90)
+            invalid(_u8L("tolerances must be >= 0.00001 mm, lengths positive, gaps nonnegative, min gap <= max gap, and slope in (0,90) degrees"));
         const auto &layers = j.at("layers");
         if (!layers.is_array() || layers.empty()) invalid(_u8L("layers must be a nonempty array"));
         for (size_t k = 0; k < layers.size(); ++k) {
@@ -110,7 +110,8 @@ LayerStack LayerStack::parse(const std::string &text)
                     for (const XY p : {XY{out.x[i],out.y[j]}, XY{out.x[i+1],out.y[j]},
                                        XY{out.x[i],out.y[j+1]}, XY{out.x[i+1],out.y[j+1]}}) {
                         const double gap = patch.value(p) - below.value(p);
-                        if (!std::isfinite(gap) || gap < lim.min_gap-1e-10 || gap > lim.max_gap+1e-10)
+                        if (!std::isfinite(gap) || gap <= 0. ||
+                            (lim.min_gap > 0. && (gap < lim.min_gap-1e-10 || gap > lim.max_gap+1e-10)))
                             invalid(Slic3r::format(_u8L("Layer %1%: vertical gap outside limits at grid cell %2%,%3%"),k,i,j));
                         const XY g = patch.gradient(p);
                         // Norm of an affine gradient is convex; its maximum over a rectangle

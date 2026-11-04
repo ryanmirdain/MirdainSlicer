@@ -195,8 +195,11 @@ std::shared_ptr<Job> prepare(Print &print, const std::string &text)
     if (!model.get_curr_plate_custom_gcodes().gcodes.empty()) invalid(_u8L("per-height custom G-code is unsupported"));
     Settings &s = job->settings;
     s.nozzle_diameter = first(config,"nozzle_diameter",.4);
-    s.min_normal_height = first(config,"min_layer_height",0.);
-    s.max_normal_height = first(config,"max_layer_height",0.);
+    // A zero minimum in supplied layers opts out of preset thickness bounds.
+    if (job->stack.limits.min_gap > 0.) {
+        s.min_normal_height = first(config,"min_layer_height",0.);
+        s.max_normal_height = first(config,"max_layer_height",0.);
+    }
     const double filament_diameter = first(config,"filament_diameter",1.75), flow_ratio = first(config,"filament_flow_ratio",1.);
     if (!std::isfinite(filament_diameter) || !std::isfinite(flow_ratio) || filament_diameter <= 0. || flow_ratio <= 0.)
         invalid(_u8L("Filament diameter and flow ratio must be positive and finite"));
