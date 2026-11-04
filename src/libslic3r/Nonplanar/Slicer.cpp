@@ -67,47 +67,144 @@ double band_volume(const std::vector<XYZ> &polygon, const Patch &top, const Patc
 
 class Intersection {
 public:
-    Intersection(const LayerStack &s, const std::function<void()> &c) : stack(s), cancel(c) {}
-
-    void require_coverage(const Object &object)
+    Intersection(const LayerStack &s, const Object &object, const std::function<void()> &c)
+        : stack(s), cancel(c), cells((s.x.size()-1)*(s.y.size()-1)), face_count(object.triangles.size()), faces(face_count)
     {
+        for (size_t face_id = 0; face_id < object.triangles.size(); ++face_id) {
+            cancel();
+            const auto &t = object.triangles[face_id];
+            if (std::abs(area(t.vertices[0],t.vertices[1],t.vertices[2])) < 1e-16) continue;
+            auto &face = faces[face_id];
+            face.min_z = std::min({t.vertices[0].z,t.vertices[1].z,t.vertices[2].z});
+            face.max_z = std::max({t.vertices[0].z,t.vertices[1].z,t.vertices[2].z});
+            for (XYZ p : t.vertices) face.projection.push_back(point(xy(p)));
+            double xmin = t.vertices[0].x, xmax = xmin, ymin = t.vertices[0].y, ymax = ymin;
+            for (XYZ p : t.vertices) {
+                xmin = std::min(xmin,p.x); xmax = std::max(xmax,p.x);
+                ymin = std::min(ymin,p.y); ymax = std::max(ymax,p.y);
+            }
+            const auto [i0,j0] = stack.cell({xmin,ymin});
+            const auto [i1,j1] = stack.cell({xmax,ymax});
+            for (size_t j = j0; j <= j1; ++j) for (size_t i = i0; i <= i1; ++i) {
+                std::vector<XYZ> polygon(t.vertices.begin(),t.vertices.end());
+                polygon = clip_axis(polygon,0,stack.x[i],true); polygon = clip_axis(polygon,0,stack.x[i+1],false);
+                polygon = clip_axis(polygon,1,stack.y[j],true); polygon = clip_axis(polygon,1,stack.y[j+1],false);
+                for (size_t n = 1; n+1 < polygon.size(); ++n) {
+                    Piece piece {{polygon[0],polygon[n],polygon[n+1]},face_id};
+                    if (std::abs(area(piece.triangle[0],piece.triangle[1],piece.triangle[2])) < 1e-16) continue;
+                    piece.min_z = std::min({piece.triangle[0].z,piece.triangle[1].z,piece.triangle[2].z});
+                    piece.max_z = std::max({piece.triangle[0].z,piece.triangle[1].z,piece.triangle[2].z});
+                    for (XYZ p : piece.triangle) piece.projection.push_back(point(xy(p)));
+                    if (std::abs(Area(piece.projection)) < 1.) continue;
+                    cells[j*(stack.x.size()-1)+i].push_back(std::move(piece));
+                }
+            }
+        }
+        for (auto &cell : cells)
+            std::sort(cell.begin(),cell.end(),[](const Piece &a, const Piece &b) { return a.max_z < b.max_z; });
+    }
+
+    void require_coverage()
+    {
+        nodes = 0;
         Paths64 uncovered;
-        for (const auto &t : object.triangles)
-            face(t,stack.layers.back(),stack.limits.geometry_tolerance,uncovered,true);
+        visit(stack.layers.back(),stack.limits.geometry_tolerance,[&](const Piece &p, const Patch &h, double low, double high) {
+            if (p.max_z < low) return;
+            if (p.min_z >= high) append({p.triangle.begin(),p.triangle.end()},uncovered,true);
+            else refine(p.triangle,h,stack.limits.geometry_tolerance,uncovered,true);
+        });
         if (!uncovered.empty()) invalid(_u8L("final supplied surface lies below the original mesh between vertices"));
     }
 
-    // Positive/negative projected face winding implements an upward vertical ray
-    // through the original closed oriented solid. Vertical faces have zero area.
-    Paths64 material(const Object &object, const Surface &surface, double shift)
+    struct SurfaceRegions {
+        Paths64 material;
+        std::vector<Paths64> faces;
+    };
+
+    std::array<SurfaceRegions,2> surface_regions(const Surface &surface)
     {
-        Paths64 polygons;
-        for (const auto &t : object.triangles)
-            face(t,surface,shift,polygons,false);
-        return Union(polygons,FillRule::Positive);
+        std::array<SurfaceRegions,2> results;
+        for (auto &result : results) result.faces.resize(face_count);
+        // Whole-face bounds apply to every surface shape. Fully above faces
+        // contribute their original projection without revisiting grid pieces.
+        const auto [minimum,maximum] = stack.bounds(surface);
+        std::vector<bool> settled(face_count,false);
+        bool crossing = false;
+        for (size_t n = 0; n < face_count; ++n) {
+            const auto &face = faces[n];
+            if (face.projection.empty() || face.max_z < minimum-boundary_epsilon) settled[n] = true;
+            else if (face.min_z >= maximum+boundary_epsilon) {
+                for (auto &result : results) result.faces[n].push_back(face.projection);
+                settled[n] = true;
+            } else crossing = true;
+        }
+        nodes = 0;
+        if (crossing) visit(surface,-boundary_epsilon,[&](const Piece &p, const Patch &h, double low, double high) {
+            if (settled[p.face_id]) return;
+            for (size_t side = 0; side < 2; ++side) {
+                auto &paths = results[side].faces[p.face_id];
+                const double offset = side ? 2.*boundary_epsilon : 0.;
+                if (p.max_z < low+offset) continue;
+                if (p.min_z >= high+offset) paths.push_back(p.projection);
+                else refine(p.triangle,h,side ? boundary_epsilon : -boundary_epsilon,paths,false);
+            }
+        });
+        for (auto &result : results) {
+            Paths64 signed_faces;
+            for (auto &paths : result.faces) {
+                signed_faces.insert(signed_faces.end(),paths.begin(),paths.end());
+                for (auto &path : paths) if (!IsPositive(path)) std::reverse(path.begin(),path.end());
+            }
+            result.material = Union(signed_faces,FillRule::Positive);
+        }
+        return results;
     }
 
-    Paths64 band(const Object &object, size_t k)
+    Paths64 band(const SurfaceRegions &bottom, const SurfaceRegions &top)
     {
-        const Surface &top = stack.layers[k], &bottom = k ? stack.layers[k-1] : stack.bed;
-        Paths64 region = intersect(material(object,top,-boundary_epsilon), material(object,bottom,boundary_epsilon));
-        // Endpoint containment alone misses cavities lying wholly between the
-        // sheets. Remove every projected boundary strictly inside the band.
-        Paths64 boundary;
-        for (const auto &t : object.triangles) {
-            Paths64 above_bottom, above_top;
-            face(t,bottom,boundary_epsilon,above_bottom,true);
-            face(t,top,-boundary_epsilon,above_top,true);
-            const auto between = difference(unite(above_bottom),unite(above_top));
+        Paths64 region = intersect(top.material,bottom.material), boundary;
+        for (size_t n = 0; n < face_count; ++n) {
+            if ((n & 4095) == 0) cancel();
+            if (bottom.faces[n].empty()) continue;
+            const auto between = top.faces[n].empty() ? bottom.faces[n] :
+                difference(unite(bottom.faces[n]),unite(top.faces[n]));
             boundary.insert(boundary.end(),between.begin(),between.end());
         }
         return difference(region,unite(boundary));
     }
 
 private:
+    struct Piece {
+        std::array<XYZ,3> triangle;
+        size_t face_id;
+        double min_z = 0., max_z = 0.;
+        Path64 projection;
+    };
     const LayerStack &stack;
     const std::function<void()> &cancel;
+    std::vector<std::vector<Piece>> cells;
+    size_t face_count;
+    struct FaceBounds { double min_z = 0., max_z = 0.; Path64 projection; };
+    std::vector<FaceBounds> faces;
     size_t nodes = 0;
+
+    template<class Fn> void visit(const Surface &surface, double shift, Fn fn)
+    {
+        const size_t nx = stack.x.size()-1;
+        for (size_t cell = 0; cell < cells.size(); ++cell) {
+            cancel();
+            if (cells[cell].empty()) continue;
+            const size_t i = cell%nx, j = cell/nx;
+            const Patch h = stack.patch(surface,i,j);
+            const std::array<double,4> heights {h.value({stack.x[i],stack.y[j]}),h.value({stack.x[i+1],stack.y[j]}),
+                h.value({stack.x[i],stack.y[j+1]}),h.value({stack.x[i+1],stack.y[j+1]})};
+            const double low = *std::min_element(heights.begin(),heights.end())+shift;
+            const double high = *std::max_element(heights.begin(),heights.end())+shift;
+            const auto first = std::lower_bound(cells[cell].begin(),cells[cell].end(),low,
+                [](const Piece &p, double z) { return p.max_z < z; });
+            for (auto it = first; it != cells[cell].end(); ++it) fn(*it,h,low,high);
+        }
+    }
 
     void append(const std::vector<XYZ> &vertices, Paths64 &out, bool positive)
     {
@@ -165,29 +262,12 @@ private:
         refine({mid[a],t[b],t[c]},h,shift,out,positive,depth+1);
     }
 
-    void face(const Triangle &t, const Surface &surface, double shift, Paths64 &out, bool positive)
-    {
-        if (std::abs(area(t.vertices[0],t.vertices[1],t.vertices[2])) < 1e-16) return;
-        double xmin = t.vertices[0].x, xmax = xmin, ymin = t.vertices[0].y, ymax = ymin;
-        for (XYZ p : t.vertices) {
-            xmin = std::min(xmin,p.x); xmax = std::max(xmax,p.x);
-            ymin = std::min(ymin,p.y); ymax = std::max(ymax,p.y);
-        }
-        const auto [i0,j0] = stack.cell({xmin,ymin});
-        const auto [i1,j1] = stack.cell({xmax,ymax});
-        for (size_t j = j0; j <= j1; ++j) for (size_t i = i0; i <= i1; ++i) {
-            std::vector<XYZ> p(t.vertices.begin(),t.vertices.end());
-            p = clip_axis(p,0,stack.x[i],true); p = clip_axis(p,0,stack.x[i+1],false);
-            p = clip_axis(p,1,stack.y[j],true); p = clip_axis(p,1,stack.y[j+1],false);
-            for (size_t n = 1; n+1 < p.size(); ++n)
-                refine({p[0],p[n],p[n+1]},stack.patch(surface,i,j),shift,out,positive);
-        }
-    }
+
 };
 
 class Planner {
 public:
-    Planner(const LayerStack &s, const Settings &p) : stack(s), settings(p), deposited(s.layers.size()) {}
+    Planner(const LayerStack &s, const Settings &p) : stack(s), settings(p), deposited(s.layers.size(),std::vector<Paths64>((s.x.size()-1)*(s.y.size()-1))) {}
 
     Path path(const Path64 &points, bool closed, size_t k, Role role, uint64_t object_id)
     {
@@ -219,7 +299,7 @@ public:
 private:
     const LayerStack &stack;
     const Settings &settings;
-    std::vector<Paths64> deposited;
+    std::vector<std::vector<Paths64>> deposited;
 
     double account_volume(XY a, XY b, size_t k, double &projected_area)
     {
@@ -227,21 +307,22 @@ private:
         const XY normal {-(b.y-a.y)/length*half,(b.x-a.x)/length*half};
         Path64 strip {point({a.x+normal.x,a.y+normal.y}),point({a.x-normal.x,a.y-normal.y}),
                       point({b.x-normal.x,b.y-normal.y}),point({b.x+normal.x,b.y+normal.y})};
-        const Paths64 fresh = difference({strip},deposited[k]);
-        deposited[k] = Union(deposited[k],Paths64{strip},FillRule::NonZero);
-        projected_area = Area(fresh)/(scale*scale);
-        if (projected_area <= 1./(scale*scale)) { projected_area = 0.; return 0.; }
-        // Attribute shared corner/seam/neighbor-wall volume only once. This
-        // keeps the union of modeled beads and the commanded volume consistent.
+        projected_area = 0.;
         const Surface &below = k ? stack.layers[k-1] : stack.bed;
-        const auto bounds = GetBounds(fresh);
+        const auto bounds = GetBounds(strip);
         const auto [i0,j0] = stack.cell(real({bounds.left,bounds.top}));
         const auto [i1,j1] = stack.cell(real({bounds.right,bounds.bottom}));
         double volume = 0.;
         for (size_t j = j0; j <= j1; ++j) for (size_t i = i0; i <= i1; ++i) {
             const Path64 cell {point({stack.x[i],stack.y[j]}),point({stack.x[i+1],stack.y[j]}),
                                point({stack.x[i+1],stack.y[j+1]}),point({stack.x[i],stack.y[j+1]})};
-            const auto clipped = intersect(fresh,{cell});
+            const auto footprint = intersect({strip},{cell});
+            if (footprint.empty()) continue;
+            auto &covered = deposited[k][j*(stack.x.size()-1)+i];
+            const auto clipped = covered.empty() ? footprint : difference(footprint,covered);
+            if (clipped.empty()) continue;
+            covered = Union(covered,clipped,FillRule::NonZero);
+            projected_area += Area(clipped)/(scale*scale);
             const Patch top = stack.patch(stack.layers[k],i,j), bottom = stack.patch(below,i,j);
             for (const auto &polygon : clipped) {
                 std::vector<XYZ> vertices;
@@ -391,16 +472,20 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
     std::vector<Paths64> occupied(stack.layers.size());
     Planner planner(stack,settings);
     for (const Object &object : objects) {
-        Intersection(stack,cancel).require_coverage(object);
+        Intersection engine(stack,object,cancel);
+        engine.require_coverage();
         bool object_has_paths = false;
         double object_volume = 0.;
         std::vector<Paths64> bands;
+        auto bottom = std::move(engine.surface_regions(stack.bed)[1]);
         for (size_t k = 0; k < stack.layers.size(); ++k) {
             cancel();
-            Intersection engine(stack,cancel);
-            bands.push_back(engine.band(object,k));
+            auto surfaces = engine.surface_regions(stack.layers[k]);
+            bands.push_back(engine.band(bottom,surfaces[0]));
             if (!intersect(occupied[k],bands.back()).empty()) invalid(_u8L("overlapping printable objects are unsupported"));
             occupied[k].insert(occupied[k].end(),bands.back().begin(),bands.back().end());
+            if (k+1 < stack.layers.size())
+                bottom = std::move(surfaces[1]);
         }
         for (size_t k = 0; k < bands.size(); ++k) {
             cancel();
