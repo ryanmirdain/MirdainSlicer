@@ -176,6 +176,7 @@
 #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/Nonplanar/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
@@ -21202,6 +21203,33 @@ bool Plater::is_multi_extruder_ams_empty()
 }
 
 //BBS: add multiple plate reslice logic
+void Plater::import_nonplanar_layers()
+{
+    wxFileDialog dialog(this, _L("Import nonplanar layers"), "", "", "JSON (*.json)|*.json", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dialog.ShowModal() != wxID_OK) return;
+    try {
+        const auto stack = Slic3r::Nonplanar::LayerStack::read(into_u8(dialog.GetPath()));
+        if (stack.plate_index != get_partplate_list().get_curr_plate_index())
+            throw std::invalid_argument("Nonplanar plate_index must match the selected plate (zero-based)");
+        background_process().stop();
+        take_snapshot(_L("Import nonplanar layers"));
+        Slic3r::Nonplanar::attach(model(),stack);
+        update(true,true);
+        wxGetApp().mainframe->update_title();
+    } catch (const std::exception &e) {
+        wxMessageBox(from_u8(e.what()),_L("Nonplanar layer input error"),wxOK | wxICON_ERROR,this);
+    }
+}
+
+void Plater::use_standard_layers()
+{
+    background_process().stop();
+    take_snapshot(_L("Use standard layers"));
+    Slic3r::Nonplanar::detach(model());
+    update(true,true);
+    wxGetApp().mainframe->update_title();
+}
+
 void Plater::reslice()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: enter, process_completed_with_error=%2%")%__LINE__ %p->process_completed_with_error;

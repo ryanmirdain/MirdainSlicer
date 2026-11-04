@@ -13045,6 +13045,12 @@ CLITransformConfigDef::CLITransformConfigDef()
 
 CLIMiscConfigDef::CLIMiscConfigDef()
 {
+    auto *nonplanar = this->add("nonplanar_layers", coString);
+    nonplanar->label = L("Nonplanar layers");
+    nonplanar->tooltip = L("Import supplied layer surfaces in placed plate coordinates.");
+    nonplanar->cli = "nonplanar-layers";
+    nonplanar->cli_params = "FILE.json";
+    nonplanar->set_default_value(new ConfigOptionString());
     ConfigOptionDef* def;
 
     /*def = this->add("ignore_nonexistent_config", coBool);

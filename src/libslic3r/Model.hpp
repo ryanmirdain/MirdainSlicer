@@ -1907,10 +1907,26 @@ private:
     template<class Archive> void load(Archive& ar) {
         Internal::StaticSerializationWrapper<ModelWipeTower> wipe_tower_wrapper(wipe_tower);
         ar(materials, objects, wipe_tower_wrapper);
+        std::map<std::string,std::string> nonplanar;
+        ar(nonplanar);
+        if (model_info || !nonplanar.empty()) {
+            model_info = model_info ? std::make_shared<ModelInfo>(*model_info) : std::make_shared<ModelInfo>();
+            for (const char *key : {"orca_nonplanar_layers_v1", "orca_nonplanar_schema_version", "orca_nonplanar_placement_v1"})
+                model_info->metadata_items.erase(key);
+            model_info->metadata_items.insert(nonplanar.begin(),nonplanar.end());
+        }
     }
     template<class Archive> void save(Archive& ar) const {
         Internal::StaticSerializationWrapper<ModelWipeTower const> wipe_tower_wrapper(wipe_tower);
         ar(materials, objects, wipe_tower_wrapper);
+        // Internal undo snapshots must restore the explicit layer mode together
+        // with geometry. Public 3MF persistence uses its existing metadata path.
+        std::map<std::string,std::string> nonplanar;
+        if (model_info) for (const char *key : {"orca_nonplanar_layers_v1", "orca_nonplanar_schema_version", "orca_nonplanar_placement_v1"}) {
+            const auto it = model_info->metadata_items.find(key);
+            if (it != model_info->metadata_items.end()) nonplanar.insert(*it);
+        }
+        ar(nonplanar);
     }
 
     //BBS: add aux temp directory

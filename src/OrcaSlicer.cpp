@@ -23,6 +23,7 @@
 #include <map>
 #include <vector>
 #include "libslic3r/PrintBase.hpp"
+#include "libslic3r/Nonplanar/Print.hpp"
 #include <boost/date_time/posix_time/posix_time_duration.hpp>
 #include <cerrno>
 #include <utility>
@@ -1385,6 +1386,23 @@ int CLI::run(int argc, char **argv)
     bool   need_skip      = (skip_objects.size() > 0)?true:false;
     long long global_begin_time = 0, global_current_time;
     sliced_info_t sliced_info;
+    std::optional<Slic3r::Nonplanar::LayerStack> nonplanar_layers;
+    if (const auto *option = m_config.option<ConfigOptionString>("nonplanar_layers"); option && !option->value.empty()) {
+        try {
+            nonplanar_layers = Slic3r::Nonplanar::LayerStack::read(option->value);
+            const auto *arrange = m_config.option<ConfigOptionInt>("arrange");
+            const auto *orient = m_config.option<ConfigOptionInt>("orient");
+            if (!m_given_option_keys.count("arrange") || !m_given_option_keys.count("orient") ||
+                !arrange || arrange->value != 0 || !orient || orient->value != 0)
+                throw std::invalid_argument("--nonplanar-layers requires explicit --arrange 0 --orient 0");
+            for (const auto &key : m_transforms)
+                if (key != "arrange" && key != "orient")
+                    throw std::invalid_argument("--nonplanar-layers forbids post-placement transform: " + key);
+        } catch (const std::exception &e) {
+            boost::nowide::cerr << e.what() << std::endl;
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+    }
     // Read up front so result.json reports it for early failures too.
     sliced_info.strict_mode = m_config.opt_bool("strict");
     // --no-check skips the check behind the only NON_CRITICAL warning --strict acts on
@@ -1467,6 +1485,10 @@ int CLI::run(int argc, char **argv)
     }
 
     bool start_gui = m_actions.empty() && !downward_check;
+    if (start_gui && nonplanar_layers) {
+        boost::nowide::cerr << "Use File > Import > Import nonplanar layers in the GUI, or supply --slice for nonplanar CLI slicing" << std::endl;
+        flush_and_exit(CLI_INVALID_PARAMS);
+    }
     if (start_gui) {
         BOOST_LOG_TRIVIAL(info) << "no action, start gui directly" << std::endl;
 #ifdef SLIC3R_GUI
@@ -1975,7 +1997,9 @@ int CLI::run(int argc, char **argv)
                         //default not orient for all, if need to orient use the action
                         //orients_requirement.insert(std::pair<size_t, bool>(o->id().id, false));
                         BOOST_LOG_TRIVIAL(info) << "object "<<o->name <<", id :"  << o->id().id << ", from stl or other 3mf\n";
-                        o->ensure_on_bed();
+                        if (!nonplanar_layers && (!model.model_info ||
+                            model.model_info->metadata_items.count(Slic3r::Nonplanar::metadata_key) == 0))
+                            o->ensure_on_bed();
                     }
                 }
                 first_file = false;
@@ -2037,6 +2061,24 @@ int CLI::run(int argc, char **argv)
         }
         model.add_default_instances();
         m_models.push_back(std::move(model));
+    }
+
+    if (nonplanar_layers) {
+        for (auto &model : m_models) Slic3r::Nonplanar::attach(model,*nonplanar_layers);
+    }
+    for (const auto &model : m_models) {
+        if (model.model_info && model.model_info->metadata_items.count(Slic3r::Nonplanar::metadata_key)) {
+            if (!m_given_option_keys.count("arrange") || !m_given_option_keys.count("orient")) {
+                boost::nowide::cerr << "Nonplanar projects require explicit --arrange 0 --orient 0" << std::endl;
+                flush_and_exit(CLI_INVALID_PARAMS);
+            }
+            for (const auto &key : m_transforms) {
+                if ((key != "arrange" && key != "orient") || m_config.opt_int(key) != 0) {
+                    boost::nowide::cerr << "Nonplanar projects forbid post-placement transforms: " << key << std::endl;
+                    flush_and_exit(CLI_INVALID_PARAMS);
+                }
+            }
+        }
     }
 
     if (!is_bbl_3mf && plate_to_slice > 0)
@@ -4039,6 +4081,12 @@ int CLI::run(int argc, char **argv)
     BOOST_LOG_TRIVIAL(info) << "total " << m_models.size() << " models, "<<orients_requirement.size()<<" objects"<<std::endl;
     if (m_models.size() > 1)
     {
+        if (!nonplanar_layers && std::any_of(m_models.begin(),m_models.end(),[](const Model &model) {
+                return model.model_info && model.model_info->metadata_items.count(Slic3r::Nonplanar::metadata_key);
+            })) {
+            boost::nowide::cerr << "Supply --nonplanar-layers again for the combined placed model; merging must not discard the saved nonplanar mode" << std::endl;
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
         BOOST_LOG_TRIVIAL(info) << "merge all the models into one\n";
         Model m;
         m.set_backup_path(m_models[0].get_backup_path());
@@ -4054,6 +4102,11 @@ int CLI::run(int argc, char **argv)
         m_models.clear();
         m_models.emplace_back(std::move(m));
     }
+
+    // CLI input merging constructs a new Model and does not copy ModelInfo.
+    // Attach to the final combined geometry so all objects share one layer job.
+    if (nonplanar_layers)
+        for (auto &model : m_models) Slic3r::Nonplanar::attach(model,*nonplanar_layers);
 
 
     //update the object config due to extruder count change
@@ -6441,6 +6494,12 @@ int CLI::run(int argc, char **argv)
         } else if (opt_key == "slice") {
             //BBS: slice 0 means all plates, i means plate i;
             plate_to_slice = m_config.option<ConfigOptionInt>("slice")->value;
+            if (nonplanar_layers && (nonplanar_layers->plate_index >= partplate_list.get_plate_count() ||
+                (plate_to_slice == 0 && (partplate_list.get_plate_count() != 1 || nonplanar_layers->plate_index != 0)) ||
+                (plate_to_slice != 0 && plate_to_slice != nonplanar_layers->plate_index+1))) {
+                boost::nowide::cerr << "Nonplanar input addresses one zero-based plate_index; use --slice plate_index+1, or --slice 0 for a single plate" << std::endl;
+                flush_and_exit(CLI_INVALID_PARAMS);
+            }
             sliced_plate = plate_to_slice;
             bool pre_check = (plate_to_slice == 0)?true:false;
             bool finished = false;

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:orcaslicer:orca_nonplanar_layers:1",
+  "title": "Externally supplied OrcaSlicer layer surfaces, version 1",
+  "type": "object",
+  "required": ["format", "version", "units", "coordinate_system", "plate_index", "grid", "bed", "limits", "layers"],
+  "properties": {
+    "format": {"const": "orca_nonplanar_layers"},
+    "version": {"const": 1},
+    "units": {"const": "mm"},
+    "coordinate_system": {"const": "plate_world_xyz"},
+    "plate_index": {"type": "integer", "minimum": 0},
+    "grid": {
+      "type": "object", "required": ["x", "y"],
+      "properties": {"x": {"$ref": "#/$defs/axis"}, "y": {"$ref": "#/$defs/axis"}}
+    },
+    "bed": {"$ref": "#/$defs/plane"},
+    "limits": {
+      "type": "object",
+      "required": ["geometry_tolerance_mm", "path_chord_tolerance_mm", "max_segment_length_mm", "min_vertical_gap_mm", "max_vertical_gap_mm", "max_slope_degrees"],
+      "properties": {
+        "geometry_tolerance_mm": {"$ref": "#/$defs/positive"},
+        "path_chord_tolerance_mm": {"$ref": "#/$defs/positive"},
+        "max_segment_length_mm": {"$ref": "#/$defs/positive"},
+        "min_vertical_gap_mm": {"$ref": "#/$defs/positive"},
+        "max_vertical_gap_mm": {"$ref": "#/$defs/positive"},
+        "max_slope_degrees": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 90}
+      }
+    },
+    "layers": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "required": ["id", "surface"],
+        "properties": {
+          "id": {"type": "integer", "minimum": 0},
+          "surface": {"oneOf": [{"$ref": "#/$defs/plane"}, {"$ref": "#/$defs/height_grid"}]}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "positive": {"type": "number", "exclusiveMinimum": 0},
+    "axis": {"type": "array", "minItems": 2, "items": {"type": "number"}},
+    "plane": {
+      "type": "object", "required": ["type", "a", "b", "c"],
+      "properties": {"type": {"const": "plane"}, "a": {"type": "number"}, "b": {"type": "number"}, "c": {"type": "number"}}
+    },
+    "height_grid": {
+      "type": "object", "required": ["type", "z"],
+      "properties": {
+        "type": {"const": "height_grid"},
+        "z": {"type": "array", "minItems": 2, "items": {"type": "array", "minItems": 2, "items": {"type": "number"}}}
+      }
+    }
+  }
+}

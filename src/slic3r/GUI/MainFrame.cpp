@@ -3107,6 +3107,14 @@ void MainFrame::init_menubar_as_editor()
 
         // BBS
         wxMenu *import_menu = new wxMenu();
+        append_menu_item(import_menu, wxID_ANY, _L("Import nonplanar layers") + dots,
+            _L("Use supplied layer surfaces for the selected plate"),
+            [this](wxCommandEvent&) { if (m_plater) m_plater->import_nonplanar_layers(); }, "", nullptr,
+            [this]() { return can_add_models(); });
+        append_menu_item(import_menu, wxID_ANY, _L("Use standard layers"),
+            _L("Remove supplied layers and return to standard slicing"),
+            [this](wxCommandEvent&) { if (m_plater) m_plater->use_standard_layers(); }, "", nullptr,
+            [this]() { return can_add_models(); });
 #ifndef __APPLE__
         append_shortcut_item(import_menu, Shortcut::ImportModel, true, _L("Import 3MF/STL/STEP/SVG/OBJ/AMF") + dots, _L("Load a model"),
             [this](wxCommandEvent&) { if (m_plater) {

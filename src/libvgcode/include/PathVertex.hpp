@@ -103,6 +103,9 @@ struct PathVertex
     // Jerk value
     //
     float jerk{ 0.0f };
+    // Native fixed-nozzle band: projected width, vertical gap, normal spacing,
+    // cross-slope. Standard vertices keep this zero-initialized.
+    std::array<float,4> nonplanar_band {};
 
     //
     // Return true if the segment is an extrusion move

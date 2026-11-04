@@ -264,6 +264,9 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
             //BBS
             int  object_label_id{-1};
             float print_z{0.0f};
+            // projected width, vertical gap, normal spacing, signed cross-slope.
+            // Zero width denotes the unchanged standard bead model.
+            std::array<float,4> nonplanar_band {};
 
             float volumetric_rate() const { return feedrate * mm3_per_mm; }
             float actual_volumetric_rate() const { return actual_feedrate * mm3_per_mm; }
@@ -1337,6 +1340,7 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
         float m_height; // mm
         float m_forced_width; // mm
         float m_forced_height; // mm
+        std::array<float,4> m_nonplanar_band {};
         float m_mm3_per_mm;
         float m_travel_dist; // mm
         float m_fan_speed; // percentage

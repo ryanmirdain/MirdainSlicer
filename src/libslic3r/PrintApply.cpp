@@ -7,6 +7,7 @@
 #include "Point.hpp"
 #include "Polygon.hpp"
 #include "Print.hpp"
+#include "Nonplanar/Print.hpp"
 #include "BeltTransform.hpp"
 #include "FilamentMixer.hpp"
 #include "Slicing.hpp"
@@ -1654,6 +1655,21 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     // Grab the lock for the Print / PrintObject milestones.
 	std::scoped_lock<std::mutex> lock(this->state_mutex());
+
+    const std::string nonplanar_source = Nonplanar::source(model,get_plate_index());
+    const bool has_nonplanar_metadata = !nonplanar_source.empty() || !m_nonplanar_source.empty();
+    if (nonplanar_source != m_nonplanar_source) {
+        this->call_cancel_callback();
+        this->invalidate_all_steps();
+        for (PrintObject *object : m_objects) object->invalidate_all_steps();
+        m_nonplanar_source = nonplanar_source;
+        m_nonplanar_job.reset();
+        update_apply_status(true);
+    }
+    // Metadata changes do not change Model's identity or object timestamps.
+    // Keep an independent copy for the worker, including placement provenance.
+    if (has_nonplanar_metadata)
+        m_model.model_info = model.model_info ? std::make_shared<ModelInfo>(*model.model_info) : nullptr;
 
     // The device-owned AMS inventory only feeds filament grouping, so a changed payload invalidates
     // the grouping steps.

@@ -5,6 +5,8 @@
 #endif
 
 #include "PrintBase.hpp"
+#include "Nonplanar/Print.hpp"
+#include <stdexcept>
 #include <utility>
 #include <string>
 #include <mutex>
@@ -240,6 +242,8 @@ void Print::clear()
 	std::scoped_lock<std::mutex> lock(this->state_mutex());
     // The following call should stop background processing if it is running.
     this->invalidate_all_steps();
+    m_nonplanar_source.clear();
+    m_nonplanar_job.reset();
 	for (PrintObject *object : m_objects)
 		delete object;
 	m_objects.clear();
@@ -3335,6 +3339,27 @@ std::map<ObjectID, unsigned int> getObjectExtruderMap(const Print& print) {
 // Slicing process, running at a background thread.
 void Print::process(long long *time_cost_with_cache, bool use_cache)
 {
+    if (nonplanar()) {
+        if (time_cost_with_cache) *time_cost_with_cache = 0;
+        if (use_cache) throw std::invalid_argument("Nonplanar slicing does not support planar slice caches");
+        m_nonplanar_job.reset();
+        this->set_status(5, L("Slicing supplied nonplanar layers"));
+        for (PrintObject *object : m_objects) object->clear_shared_object();
+        for (PrintObject *object : m_objects) {
+            object->clear_support_layers();
+            object->clear_layers();
+        }
+        m_nonplanar_job = Nonplanar::prepare(*this,m_nonplanar_source);
+        // These milestones now refer to the native nonplanar job. No scalar-Z
+        // layers are synthesized to send through the standard slicing pipeline.
+        for (PrintObject *object : m_objects)
+            for (int step = 0; step < posCount; ++step)
+                if (object->set_started(PrintObjectStep(step))) object->set_done(PrintObjectStep(step));
+        for (auto step : {psWipeTower,psSkirtBrim})
+            if (this->set_started(step)) this->set_done(step);
+        this->set_status(80, L("Nonplanar paths generated"));
+        return;
+    }
     long long start_time = 0, end_time = 0;
     if (time_cost_with_cache)
         *time_cost_with_cache = 0;
@@ -4051,6 +4076,12 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 // It is up to the caller to show an error message.
 std::string Print::export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
+    if (nonplanar()) {
+        if (!m_nonplanar_job) throw std::logic_error("Generate nonplanar paths before exporting G-code");
+        const std::string path = Nonplanar::export_gcode(*this,*m_nonplanar_job,this->output_filepath(path_template),result);
+        if (this->set_started(psGCodeExport)) this->set_done(psGCodeExport);
+        return path;
+    }
     // output everything to a G-code file
     // The following call may die if the filename_format template substitution fails.
     std::string path = this->output_filepath(path_template);
@@ -6714,6 +6745,7 @@ static void from_json(const json& j, groupedVolumeSlices& firstlayer_group)
 
 int Print::export_cached_data(const std::string& directory, bool with_space)
 {
+    if (nonplanar()) throw std::invalid_argument("Nonplanar jobs cannot export planar slice caches");
     int ret = 0;
     boost::filesystem::path directory_path(directory);
 
@@ -6982,6 +7014,7 @@ int Print::export_cached_data(const std::string& directory, bool with_space)
 
 int Print::load_cached_data(const std::string& directory)
 {
+    if (nonplanar()) throw std::invalid_argument("Nonplanar jobs cannot load planar slice caches");
     int ret = 0;
     boost::filesystem::path directory_path(directory);
 

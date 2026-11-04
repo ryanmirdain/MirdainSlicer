@@ -2,6 +2,14 @@
 include(ProcessorCount)
 ProcessorCount(NPROC)
 
+# CPython's --enable-optimizations runs its test suite to generate PGO data.
+# Keep compilation-only builds possible even when no Orca tests are enabled.
+option(ORCA_PYTHON_PGO "Run CPython's test workload to generate PGO data" OFF)
+set(_python_optimization)
+if(ORCA_PYTHON_PGO)
+    set(_python_optimization --enable-optimizations)
+endif()
+
 set(_python_version "3.12.13")
 string(REGEX REPLACE "^([0-9]+\\.[0-9]+)\\..*" "\\1" _python_version_short "${_python_version}")
 set(_python_url "https://www.python.org/ftp/python/${_python_version}/Python-${_python_version}.tar.xz")
@@ -259,7 +267,7 @@ elseif(APPLE)
                ./configure \
                  --prefix='${DESTDIR}/libpython' \
                  --enable-shared \
-                 --enable-optimizations \
+                 ${_python_optimization} \
                  --without-static-libpython \
                  --with-openssl='${DESTDIR}' \
                  --disable-test-modules \
@@ -281,7 +289,7 @@ elseif(APPLE)
             ./configure
             --prefix=${DESTDIR}/libpython
             --enable-shared
-            --enable-optimizations
+            ${_python_optimization}
             --without-static-libpython
             --with-openssl=${DESTDIR}
             --disable-test-modules
@@ -329,7 +337,7 @@ else()
     set(_conf_cmd ./configure
         --prefix=${_python_prefix}
         --enable-shared
-        --enable-optimizations
+        ${_python_optimization}
         --with-openssl=${DESTDIR}
         --without-static-libpython
         --disable-test-modules

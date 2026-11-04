@@ -1083,7 +1083,7 @@ static void extract_pos_and_or_hwa(const std::vector<PathVertex>& vertices, floa
                               static_cast<float>(v.layer_id) + (is_joint(vertices, i) ? 0.5f : 0.0f) };
             if (move_type == EMoveType::Extrude)
                 // push down extrusion vertices by half height to render them at the right z
-                position[2] -= 0.5f * v.height;
+                position[2] -= 0.5f * (v.nonplanar_band[0] > 0.f ? v.nonplanar_band[1] : v.height);
             positions->emplace_back(position);
         }
 
@@ -1101,6 +1101,10 @@ static void extract_pos_and_or_hwa(const std::vector<PathVertex>& vertices, floa
             else {
                 height = v.height;
                 width = v.width;
+                if (v.nonplanar_band[0] > 0.f) {
+                    height = v.nonplanar_band[1];
+                    width = v.nonplanar_band[0];
+                }
             }
             
             // ORCA: Set bias for wipes and options to avoid z-fighting
@@ -1109,6 +1113,10 @@ static void extract_pos_and_or_hwa(const std::vector<PathVertex>& vertices, floa
                 bias = 0.05f;
             else if (v.is_option())
                 bias = 0.1f;
+            // Negative values encode a native band without adding GPU buffers.
+            // atan maps any finite slope into a disjoint, bounded marker range.
+            if (v.is_extrusion() && v.nonplanar_band[0] > 0.f)
+                bias = -4.f + std::atan(v.nonplanar_band[3]);
 
             // the last component is a dummy float to comply with GL_RGBA32F format
             // ORCA: Pass bias to shader

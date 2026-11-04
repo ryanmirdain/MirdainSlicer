@@ -40,6 +40,7 @@
 #include <cstdint>
 #include <cmath>
 #include <exception>
+#include <stdexcept>
 #include <deque>
 #include <cstdio>
 #include <cstring>
@@ -3760,6 +3761,7 @@ void GCodeProcessor::reset()
     m_height = 0.0f;
     m_forced_width = 0.0f;
     m_forced_height = 0.0f;
+    m_nonplanar_band = {};
     m_mm3_per_mm = 0.0f;
     m_travel_dist = 0.0f;
     m_fan_speed = 0.0f;
@@ -4422,6 +4424,16 @@ bool GCodeProcessor::get_last_position_from_gcode(const std::string &gcode_str, 
 
 void GCodeProcessor::process_tags(const std::string_view comment, bool producers_enabled)
 {
+    if (boost::starts_with(comment,"NONPLANAR_BAND:")) {
+        const std::string text(comment.substr(15));
+        std::array<float,4> band {};
+        if (std::sscanf(text.c_str(),"%f,%f,%f,%f",&band[0],&band[1],&band[2],&band[3]) != 4 ||
+            band[0] <= 0 || band[1] <= 0 || band[2] <= 0 ||
+            std::any_of(band.begin(),band.end(),[](float v) { return !std::isfinite(v); }))
+            throw std::invalid_argument("Invalid NONPLANAR_BAND G-code dimensions");
+        m_nonplanar_band = band;
+        return;
+    }
     // producers tags
     if (producers_enabled && process_producers_tags(comment))
         return;
@@ -4429,6 +4441,7 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
     // extrusion role tag
     if (boost::starts_with(comment, reserved_tag(ETags::Role))) {
         set_extrusion_role(ExtrusionEntity::string_to_role(comment.substr(reserved_tag(ETags::Role).length())));
+        if (m_extrusion_role == erCustom || m_extrusion_role == erNone) m_nonplanar_band = {};
         if (m_extrusion_role == erExternalPerimeter)
             m_seams_detector.activate(true);
         m_processing_start_custom_gcode = (m_extrusion_role == erCustom && m_g1_line_id == 0);
@@ -7600,6 +7613,7 @@ void GCodeProcessor::store_move_vertex(EMoveType type, EMovePathType path_type, 
         m_object_label_id,
         m_print_z
     });
+    if (type == EMoveType::Extrude) m_result.moves.back().nonplanar_band = m_nonplanar_band;
 
     if (type == EMoveType::Seam) {
         m_seams_count++;
@@ -7651,7 +7665,7 @@ void GCodeProcessor::add_object_mass(int filament_id, float volume)
     const bool   has_density = size_t(filament_id) < m_result.filament_densities.size() && m_result.filament_densities[filament_id] > 0.f;
     const double mass        = double(volume) * (has_density ? m_result.filament_densities[filament_id] : DEFAULT_FILAMENT_DENSITY);
     // In the frame of the stored moves, the bead's center half its height below the nozzle, from the move's start to its end.
-    const Vec3d half_height = 0.5 * double(m_height) * Vec3d::UnitZ();
+    const Vec3d half_height = 0.5 * double(m_nonplanar_band[0] > 0.f ? m_nonplanar_band[1] : m_height) * Vec3d::UnitZ();
     const Vec3d offset      = Vec3d(m_x_offset, m_y_offset, -m_z_offset) - half_height + m_extruder_offsets[filament_id].cast<double>();
     const Vec3d start       = Vec3d(m_start_position[X], m_start_position[Y], m_start_position[Z]) + offset;
     const Vec3d end         = Vec3d(m_end_position[X], m_end_position[Y], m_end_position[Z]) + offset;

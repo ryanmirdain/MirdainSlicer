@@ -27,6 +27,12 @@ if (SLIC3R_CAD)
 endif ()
 
 set(lisbslic3r_sources
+    Nonplanar/LayerStack.cpp
+    Nonplanar/LayerStack.hpp
+    Nonplanar/Slicer.cpp
+    Nonplanar/Slicer.hpp
+    Nonplanar/Print.cpp
+    Nonplanar/Print.hpp
     AABBMesh.cpp
     AABBMesh.hpp
     AABBTreeIndirect.hpp

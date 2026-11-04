@@ -1,0 +1,18 @@
+{
+  "format": "orca_nonplanar_layers", "version": 1, "units": "mm",
+  "coordinate_system": "plate_world_xyz", "plate_index": 0,
+  "grid": {"x": [0, 10, 20], "y": [0, 10, 20]},
+  "bed": {"type": "plane", "a": 0, "b": 0, "c": 0},
+  "limits": {
+    "geometry_tolerance_mm": 0.01, "path_chord_tolerance_mm": 0.01,
+    "max_segment_length_mm": 0.5, "min_vertical_gap_mm": 0.08,
+    "max_vertical_gap_mm": 0.35, "max_slope_degrees": 45
+  },
+  "layers": [
+    {"id": 0, "surface": {"type": "plane", "a": 0, "b": 0, "c": 0.2}},
+    {"id": 1, "surface": {"type": "height_grid", "z": [[0.4, 0.41, 0.4], [0.41, 0.44, 0.41], [0.4, 0.41, 0.4]]}},
+    {"id": 2, "surface": {"type": "plane", "a": 0, "b": 0, "c": 0.6}},
+    {"id": 3, "surface": {"type": "plane", "a": 0, "b": 0, "c": 0.8}},
+    {"id": 4, "surface": {"type": "plane", "a": 0, "b": 0, "c": 1.0}}
+  ]
+}
