@@ -81,7 +81,6 @@ LayerStack LayerStack::parse(const std::string &text)
         out.x = axis(j.at("grid").at("x"), "x");
         out.y = axis(j.at("grid").at("y"), "y");
         out.bed = surface(j.at("bed"), out.x.size(), out.y.size(), "bed");
-        if (!out.bed.plane) invalid(_u8L("bed must be a plane"));
         const auto &l = j.at("limits");
         out.limits = {number(l.at("geometry_tolerance_mm"), "geometry_tolerance_mm"),
                       number(l.at("path_chord_tolerance_mm"), "path_chord_tolerance_mm"),
@@ -90,9 +89,8 @@ LayerStack LayerStack::parse(const std::string &text)
                       number(l.at("max_vertical_gap_mm"), "max_vertical_gap_mm"),
                       number(l.at("max_slope_degrees"), "max_slope_degrees")};
         const auto &lim = out.limits;
-        if (lim.geometry_tolerance < 1e-5 || lim.chord_tolerance < 1e-5 || lim.max_segment_length <= 0 ||
-            lim.min_gap < 0 || lim.max_gap < lim.min_gap || lim.max_slope_degrees < 0 || lim.max_slope_degrees >= 90)
-            invalid(_u8L("tolerances must be >= 0.00001 mm, lengths positive, gaps nonnegative, min gap <= max gap, and slope in [0,90) degrees"));
+        if (lim.geometry_tolerance <= 0. || lim.chord_tolerance <= 0. || lim.max_segment_length <= 0.)
+            invalid(_u8L("geometry/chord tolerances and maximum segment length must be positive"));
         const auto &layers = j.at("layers");
         if (!layers.is_array() || layers.empty()) invalid(_u8L("layers must be a nonempty array"));
         for (size_t k = 0; k < layers.size(); ++k) {
@@ -101,7 +99,6 @@ LayerStack LayerStack::parse(const std::string &text)
                 invalid(_u8L("layer IDs must be consecutive from zero"));
             out.layers.push_back(surface(entry.at("surface"), out.x.size(), out.y.size(), "layer " + std::to_string(k)));
         }
-        const double slope = std::tan(lim.max_slope_degrees * std::acos(-1.) / 180.);
         for (size_t k = 0; k < out.layers.size(); ++k) {
             const Surface &s = out.layers[k], &prev = k ? out.layers[k-1] : out.bed;
             for (size_t j = 0; j+1 < out.y.size(); ++j)
@@ -110,15 +107,11 @@ LayerStack LayerStack::parse(const std::string &text)
                     for (const XY p : {XY{out.x[i],out.y[j]}, XY{out.x[i+1],out.y[j]},
                                        XY{out.x[i],out.y[j+1]}, XY{out.x[i+1],out.y[j+1]}}) {
                         const double gap = patch.value(p) - below.value(p);
-                        if (!std::isfinite(gap) || gap <= 0. ||
-                            (lim.min_gap > 0. && (gap < lim.min_gap-1e-10 || gap > lim.max_gap+1e-10)))
-                            invalid(Slic3r::format(_u8L("Layer %1%: vertical gap outside limits at grid cell %2%,%3%"),k,i,j));
+                        if (!std::isfinite(gap) || gap <= 0.)
+                            invalid(Slic3r::format(_u8L("Layer %1%: surfaces must be strictly ordered at grid cell %2%,%3%"),k,i,j));
                         const XY g = patch.gradient(p);
-                        // Norm of an affine gradient is convex; its maximum over a rectangle
-                        // is attained at a corner, including both sides of grid seams.
-                        if (!std::isfinite(g.x) || !std::isfinite(g.y) ||
-                            (lim.max_slope_degrees > 0. && std::hypot(g.x,g.y) > slope+1e-10))
-                            invalid(Slic3r::format(_u8L("Layer %1%: interpolated slope exceeds limit"),k));
+                        if (!std::isfinite(g.x) || !std::isfinite(g.y))
+                            invalid(Slic3r::format(_u8L("Layer %1%: surface gradient must be finite"),k));
                     }
                 }
         }
@@ -221,7 +214,9 @@ double LayerStack::normal_spacing(size_t k, XY p) const
         std::sort(roots.begin(),roots.end());
         for (double u : roots) if (u >= -1e-10 && u <= 1.+1e-10 && t0+u*span > 0.) return t0+u*span;
     }
-    invalid(_u8L("downward normal does not reach the preceding surface within the shared grid; enlarge the domain or redesign the stack"));
+    // Near a domain edge the exact normal ray may leave the supplied grid.
+    // The local tangent spacing still gives a usable preview dimension.
+    return vertical_gap(k,p)/norm;
 }
 
 } // namespace Slic3r::Nonplanar

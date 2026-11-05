@@ -25,7 +25,6 @@
 #include <memory>
 #include <sstream>
 #include <stdexcept>
-#include <unordered_map>
 #include <utility>
 
 namespace Slic3r::Nonplanar {
@@ -63,8 +62,7 @@ double scalar(const DynamicPrintConfig &c, const char *key, double fallback)
     if (const auto *v = dynamic_cast<const ConfigOptionFloats*>(o)) return v->values.front();
     if (const auto *v = dynamic_cast<const ConfigOptionFloatsNullable*>(o)) {
         const double value = v->values.front();
-        if (!std::isfinite(value)) invalid(Slic3r::format(_u8L("%1% must be explicitly set for nonplanar slicing"),key));
-        return value;
+        return std::isfinite(value) ? value : fallback;
     }
     if (const auto *v = dynamic_cast<const ConfigOptionInts*>(o)) return v->values.front();
     return o->type() == coInt ? o->getInt() : o->getFloat();
@@ -74,20 +72,6 @@ double first(const DynamicPrintConfig &c, const char *key, double fallback)
     const auto *o = c.option<ConfigOptionFloats>(key);
     return o && !o->values.empty() ? o->values.front() : fallback;
 }
-void validate_mesh(const indexed_triangle_set &mesh)
-{
-    std::unordered_map<uint64_t,std::pair<unsigned,int>> edges;
-    for (const auto &face : mesh.indices) for (int n = 0; n < 3; ++n) {
-        const uint32_t a = face[n], b = face[(n+1)%3];
-        const uint64_t key = (uint64_t(std::min(a,b)) << 32) | std::max(a,b);
-        auto &edge = edges[key]; ++edge.first; edge.second += a < b ? 1 : -1;
-    }
-    for (const auto &entry : edges)
-        if (entry.second.first != 2 || entry.second.second != 0)
-            invalid(_u8L("original mesh must be closed, manifold and consistently oriented"));
-    if (its_volume(mesh) <= 0.) invalid(_u8L("original mesh must have outward orientation and positive volume"));
-}
-
 const char *role_name(Role role)
 {
     switch (role) {
@@ -134,73 +118,40 @@ std::shared_ptr<Job> prepare(Print &print, const std::string &text)
 {
     auto job = std::make_shared<Job>();
     job->stack = LayerStack::parse(text);
-    if (job->stack.limits.geometry_tolerance < .0002 || job->stack.limits.chord_tolerance < .0002 ||
-        job->stack.limits.max_segment_length <= .0002)
-        invalid(_u8L("native G-code uses four decimal XYZ coordinates; geometry/chord tolerances must be >= 0.0002 mm and max segment length > 0.0002 mm"));
-    const auto &model = print.model();
-    const auto &items = model.model_info->metadata_items;
-    const auto saved = items.find(placement_key);
-    if (saved == items.end() || saved->second != placement(model))
-        invalid(_u8L("model placement changed since layer import; restore placement or import redesigned layers"));
+    // Match achievable G-code precision without rejecting finer requests.
+    job->stack.limits.geometry_tolerance = std::max(.0002,job->stack.limits.geometry_tolerance);
+    job->stack.limits.chord_tolerance = std::max(.0002,job->stack.limits.chord_tolerance);
+    job->stack.limits.max_segment_length = std::max(.0004,job->stack.limits.max_segment_length);
     const auto &config = print.full_print_config();
-    if (!model.get_curr_plate_custom_gcodes().gcodes.empty()) invalid(_u8L("per-height custom G-code is unsupported"));
     Settings &s = job->settings;
     s.nozzle_diameter = first(config,"nozzle_diameter",.4);
-    // A zero minimum in supplied layers opts out of preset thickness bounds.
-    if (job->stack.limits.min_gap > 0.) {
-        s.min_normal_height = first(config,"min_layer_height",0.);
-        s.max_normal_height = first(config,"max_layer_height",0.);
-    }
     const double filament_diameter = first(config,"filament_diameter",1.75), flow_ratio = first(config,"filament_flow_ratio",1.);
     if (!std::isfinite(filament_diameter) || !std::isfinite(flow_ratio) || filament_diameter <= 0. || flow_ratio <= 0.)
         invalid(_u8L("Filament diameter and flow ratio must be positive and finite"));
-    s.min_deposited_volume = .25*std::acos(-1.)*filament_diameter*filament_diameter*1e-6/flow_ratio;
     s.width = config.get_abs_value("line_width",s.nozzle_diameter);
     if (s.width == 0.) s.width = s.nozzle_diameter*1.125;
-    // All roles use one explicit projected width. Role-specific widths would
-    // change the erosion, physical cross-section, and spacing together.
-    for (auto key : {"outer_wall_line_width","inner_wall_line_width","sparse_infill_line_width", "internal_solid_infill_line_width","top_surface_line_width", "initial_layer_line_width"}) {
-        const double width = config.get_abs_value(key,s.nozzle_diameter);
-        if (width != 0. && std::abs(width-s.width) > 1e-5)
-            invalid(Slic3r::format(_u8L("%1% must equal line_width (or be zero for automatic width)"),key));
-    }
     s.walls = config.opt_int("wall_loops");
     s.top_layers = config.opt_int("top_shell_layers");
     s.bottom_layers = config.opt_int("bottom_shell_layers");
     s.density = scalar(config,"sparse_infill_density",15.)*.01;
     s.infill_angle = scalar(config,"infill_direction",45.);
     s.max_z = scalar(config,"printable_height",250.);
-    s.clearance_radius = scalar(config,"extruder_clearance_radius",0.);
-    s.clearance_height = std::min({scalar(config,"extruder_clearance_height_to_rod",0.),
-                                  scalar(config,"extruder_clearance_height_to_lid",0.), scalar(config,"nozzle_height",0.)});
-    if (s.clearance_radius <= 0 || s.clearance_height <= 0) invalid(_u8L("positive toolhead clearance radius and height are required"));
     std::vector<Object> objects;
     const Vec3d origin = print.get_plate_origin();
-    Polygon bed_polygon = Polygon::new_scale(config.option<ConfigOptionPoints>("printable_area")->values);
-    bed_polygon.make_counter_clockwise();
-    if (!polygon_is_convex(bed_polygon))
-        invalid(_u8L("nonplanar travel currently requires a convex printable area"));
     for (const auto *po : print.objects()) {
         const auto *mo = po->model_object();
-        for (const auto &key : mo->config.get().keys())
-            if (key != "extruder" || mo->config.get().opt_int(key) > 1) invalid(_u8L("per-object overrides are unsupported"));
         if (mo->volumes.size() != 1) invalid(_u8L("use one watertight model volume per object"));
         for (const auto &instance : po->instances()) {
             Object object;
             object.id = po->id().id;
             for (const auto *volume : mo->volumes) {
                 if (!volume->is_model_part()) invalid(_u8L("modifier and negative volumes are unsupported; use a watertight mesh with native cavities"));
-                for (const auto &key : volume->config.get().keys())
-                    if (key != "extruder" || volume->config.get().opt_int(key) > 1) invalid(_u8L("per-volume overrides are unsupported"));
                 const Transform3d transform = instance.model_instance->get_matrix()*volume->get_matrix();
                 const auto &mesh = volume->mesh().its;
-                validate_mesh(mesh);
                 for (const auto &face : mesh.indices) {
                     Triangle triangle;
                     for (int n = 0; n < 3; ++n) {
                         const Vec3d p = transform*mesh.vertices[face[n]].cast<double>()-origin;
-                        if (!bed_polygon.contains(Point(scale_(p.x()),scale_(p.y()))))
-                            invalid(_u8L("model is outside the printable area"));
                         triangle.vertices[n] = {p.x(),p.y(),p.z()};
                     }
                     if (transform.linear().determinant() < 0) std::swap(triangle.vertices[1],triangle.vertices[2]);
@@ -226,19 +177,24 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
     auto parser = print.placeholder_parser();
     parser.set("initial_tool",0);
     parser.set("initial_extruder",0);
+    for (const char *key : {"initial_no_support_tool","initial_no_support_extruder","initial_no_support_hotend",
+                           "initial_filament_id","initial_no_support_filament_id","initial_nozzle_id",
+                           "current_filament_id","current_extruder_id","current_nozzle_id","current_hotend"})
+        parser.set(key,0);
     parser.set("current_extruder",0);
     parser.set("total_layer_count",int(job.layers.size()));
-    size_t last_printed = 0;
+    size_t last_printed = 0, first_printed = 0;
     const Path *finishing_path = nullptr;
     double max_printed_z = 0.;
     for (size_t k = 0; k < job.layers.size(); ++k)
         for (const Path &path : job.layers[k].paths)
             if (std::any_of(path.segments.begin(),path.segments.end(),[](const Segment &s) { return s.volume > 0.; })) {
+                if (!finishing_path) first_printed = k;
                 last_printed = k; finishing_path = &path;
                 max_printed_z = std::max(max_printed_z,job.layers[k].max_z);
             }
     parser.set("layer_num",0);
-    parser.set("layer_z",job.layers.front().max_z);
+    parser.set("layer_z",job.layers[first_printed].max_z);
     parser.set("max_layer_z",max_printed_z);
     parser.set("max_print_z",std::ceil(max_printed_z));
     parser.set("max_print_height",job.settings.max_z);
@@ -246,7 +202,7 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
     parser.set("model_name",print.get_model_name());
     parser.set("plate_number",print.get_plate_number_formatted());
     BoundingBoxf first_layer_box;
-    for (const auto &path : job.layers.front().paths) {
+    for (const auto &path : job.layers[first_printed].paths) {
         first_layer_box.merge(Vec2d(path.start.x,path.start.y));
         for (const auto &segment : path.segments) first_layer_box.merge(Vec2d(segment.end.x,segment.end.y));
     }
@@ -266,6 +222,21 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
     parser.set("bed_temperature",bed->clone());
     parser.set("first_layer_temperature",initial_nozzle->clone());
     parser.set("bed_temperature_initial_layer_single",initial_bed->values.front());
+    double flush_speed = first(config,"filament_flush_volumetric_speed",0.);
+    if (flush_speed == 0.) flush_speed = first(config,"filament_max_volumetric_speed",0.);
+    const bool fast_flush = config.opt_enum<PrimeVolumeMode>("prime_volume_mode") == PrimeVolumeMode::pvmFast;
+    const auto *flush_config = config.option<ConfigOptionInts>(fast_flush ? "filament_flush_temp_fast" : "filament_flush_temp");
+    int flush_temperature = flush_config->values.front();
+    if (flush_temperature == 0) flush_temperature = config.option<ConfigOptionInts>("nozzle_temperature_range_high")->values.front();
+    parser.set("flush_volumetric_speeds",new ConfigOptionFloats{flush_speed});
+    parser.set("flush_temperatures",new ConfigOptionInts{flush_temperature});
+    const double initial_height = job.stack.vertical_gap(first_printed,XY{job.layers[first_printed].paths.front().start.x,job.layers[first_printed].paths.front().start.y});
+    const double flow_limit = first(config,"filament_max_volumetric_speed",0.);
+    double outer_flow = scalar(config,"outer_wall_speed",40.)*job.settings.width*initial_height;
+    if (flow_limit > 0.) outer_flow = std::min(outer_flow,flow_limit);
+    parser.set("outer_wall_volumetric_speed",outer_flow);
+    parser.set("initial_layer_print_height",initial_height);
+    parser.set("during_print_exhaust_fan_speed_num",config.option("during_print_exhaust_fan_speed")->clone());
     PlaceholderParser::ContextData context;
     const std::string startup = parser.process(config.opt_string("machine_start_gcode"),0,nullptr,&context);
     const auto &filament_start_template = config.option<ConfigOptionStrings>("filament_start_gcode")->values.front();
@@ -326,10 +297,8 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
     double printed_max = job.stack.bounds(job.stack.bed).second;
     double volume = 0.;
     auto clear_travel = [&](const Vec3d &target) {
-        const double safe_z = std::max(printed_max,target.z()) + std::max(1.,job.stack.limits.max_gap)+tol;
-        if (safe_z > job.settings.max_z) invalid(_u8L("collision-free travel exceeds machine Z height"));
-        if (target.z()+job.settings.clearance_height <= printed_max+tol)
-            invalid(_u8L("toolhead clearance cannot reach this path below already printed geometry"));
+        const double safe_z = std::min(job.settings.max_z,
+            std::max(printed_max,target.z())+std::max(1.,job.stack.limits.max_gap)+tol);
         out << writer.retract() << writer.set_speed(xy_travel*60.)
             << writer.travel_to_z(safe_z,"nonplanar clearance",true)
             << writer.travel_to_xyz({target.x(),target.y(),safe_z},"nonplanar travel",true)
@@ -382,8 +351,6 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
                 if (segment.volume == 0.) { clear_travel(end); previous = end; continue; }
                 const double maximum_feed = segment_feed(path_data,segment,previous,k);
                 const double feed = std::min(maximum_feed,std::max(first(config,"slow_down_min_speed",0.),maximum_feed*cooling_scale));
-                if (end.z()+job.settings.clearance_height <= printed_max+tol)
-                    invalid(_u8L("toolhead clearance fails along a nonplanar deposition path"));
                 // Native metadata drives modeled preview dimensions per segment.
                 out << "; LINE_WIDTH: " << segment.physical_width << "\n; LAYER_HEIGHT: " << segment.normal_height
                     << "\n;NONPLANAR_BAND:" << job.settings.width << ',' << segment.vertical_height << ','

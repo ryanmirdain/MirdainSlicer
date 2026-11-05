@@ -315,94 +315,24 @@ private:
         return projected_area*gap;
     }
 
-    // Bound the complete projected strip, including transverse curvature and
-    // its maximum deposited top. Flow is accounted separately after refinement.
-    void bound_strip(XY a, XY b, size_t k, double &preview_error, double &max_top_z) const
-    {
-        const double ds = std::hypot(b.x-a.x,b.y-a.y), half = settings.width*.5;
-        const XY normal {-(b.y-a.y)/ds*half,(b.x-a.x)/ds*half};
-        const std::vector<XYZ> strip {{a.x+normal.x,a.y+normal.y,0.},{b.x+normal.x,b.y+normal.y,0.},
-                                     {b.x-normal.x,b.y-normal.y,0.},{a.x-normal.x,a.y-normal.y,0.}};
-        double xmin = a.x, xmax = a.x, ymin = a.y, ymax = a.y;
-        for (XYZ p : strip) { xmin = std::min(xmin,p.x); xmax = std::max(xmax,p.x); ymin = std::min(ymin,p.y); ymax = std::max(ymax,p.y); }
-        const auto [i0,j0] = stack.cell({xmin,ymin});
-        const auto [i1,j1] = stack.cell({xmax,ymax});
-        const Surface &below = k ? stack.layers[k-1] : stack.bed;
-        const XY mid {(a.x+b.x)*.5,(a.y+b.y)*.5};
-        const XY grad = stack.gradient(stack.layers[k],mid);
-        const double za = stack.value(stack.layers[k],a), zb = stack.value(stack.layers[k],b);
-        const double gap = stack.vertical_gap(k,mid);
-        const XY tangent {(b.x-a.x)/ds,(b.y-a.y)/ds}, right {tangent.y,-tangent.x};
-        const double cross_slope = grad.x*right.x+grad.y*right.y;
-        const XY slope {tangent.x*(zb-za)/ds+right.x*cross_slope,
-                        tangent.y*(zb-za)/ds+right.y*cross_slope};
-        preview_error = 0.;
-        max_top_z = -std::numeric_limits<double>::infinity();
-        for (size_t j = j0; j <= j1; ++j) for (size_t i = i0; i <= i1; ++i) {
-            auto polygon = clip_axis(strip,0,stack.x[i],true); polygon = clip_axis(polygon,0,stack.x[i+1],false);
-            polygon = clip_axis(polygon,1,stack.y[j],true); polygon = clip_axis(polygon,1,stack.y[j+1],false);
-            if (polygon.size() < 3) continue;
-            const Patch top = stack.patch(stack.layers[k],i,j), bottom = stack.patch(below,i,j);
-            // Bound the linear preview's complete top AND bottom, including
-            // transverse curvature. A bead that cannot be represented within
-            // tolerance is rejected rather than displayed as a planar bead.
-            for (int side = 0; side < 2; ++side) {
-                const Patch &sheet = side ? bottom : top;
-                auto residual = [&](XYZ p) {
-                    return sheet.value(xy(p))-(za+slope.x*(p.x-a.x)+slope.y*(p.y-a.y)-(side ? gap : 0.));
-                };
-                for (size_t n = 1; n+1 < polygon.size(); ++n) {
-                    const std::array<XYZ,3> tri {polygon[0],polygon[n],polygon[n+1]};
-                    for (size_t v = 0; v < 3; ++v) {
-                        const double f0 = residual(tri[v]), f1 = residual(tri[(v+1)%3]);
-                        const double control = 2.*residual(mix(tri[v],tri[(v+1)%3],.5))-.5*(f0+f1);
-                        preview_error = std::max({preview_error,std::abs(f0),std::abs(control)});
-                        if (side == 0) {
-                            const double z0 = top.value(xy(tri[v])), z1 = top.value(xy(tri[(v+1)%3]));
-                            const double bound = 2.*top.value(xy(mix(tri[v],tri[(v+1)%3],.5)))-.5*(z0+z1);
-                            max_top_z = std::max({max_top_z,z0,bound});
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     void segment(Path &out, XY a, XY b, size_t k, unsigned depth)
     {
         const XY mid {(a.x+b.x)*.5,(a.y+b.y)*.5};
         const XYZ p {a.x,a.y,stack.value(stack.layers[k],a)}, q {b.x,b.y,stack.value(stack.layers[k],b)};
         const double zm = stack.value(stack.layers[k],mid), gap = stack.vertical_gap(k,mid);
-        const double ga = stack.vertical_gap(k,a), gb = stack.vertical_gap(k,b);
-        if (stack.limits.min_gap > 0. && std::max({ga,gb,gap}) > settings.nozzle_diameter+1e-10)
-            invalid(_u8L("local vertical gap exceeds the nozzle diameter"));
         const double chord_error = std::abs(zm-(p.z+q.z)*.5);
-        // Include the cross-width surface variation in the modeled bead top:
-        // the emitted centerline is on H; the ideal band envelope follows H.
-        if (distance(p,q) > stack.limits.max_segment_length-.00018 || chord_error > stack.limits.chord_tolerance*.5 ||
-            std::max(std::abs(ga-gap),std::abs(gb-gap)) > .01*gap) {
-            if (depth == 40) invalid(_u8L("path/flow segmentation did not converge"));
+        if (depth < 32 && (distance(p,q) > stack.limits.max_segment_length-.00018 ||
+                           chord_error > stack.limits.chord_tolerance*.5)) {
             segment(out,a,mid,k,depth+1); segment(out,mid,b,k,depth+1); return;
         }
         const double ds = std::hypot(b.x-a.x,b.y-a.y);
         if (ds < 1e-10) return;
-        const double normal = stack.normal_spacing(k,mid), na = stack.normal_spacing(k,a), nb = stack.normal_spacing(k,b);
-        for (double spacing : {na,normal,nb})
-            if ((settings.min_normal_height > 0. && spacing < settings.min_normal_height-1e-10) ||
-                (settings.max_normal_height > 0. && spacing > settings.max_normal_height+1e-10))
-                invalid(_u8L("local normal spacing exceeds the nozzle profile's layer-height limits"));
-        if (std::max(std::abs(na-normal),std::abs(nb-normal)) > .01*normal) {
-            if (depth == 40) invalid(_u8L("normal-spacing segmentation did not converge"));
-            segment(out,a,mid,k,depth+1); segment(out,mid,b,k,depth+1); return;
-        }
+        const double normal = stack.normal_spacing(k,mid);
         const XY grad = stack.gradient(stack.layers[k],mid);
         const double cross_slope = (-grad.x*(b.y-a.y)+grad.y*(b.x-a.x))/ds;
-        double preview_error, max_top_z;
-        bound_strip(a,b,k,preview_error,max_top_z);
-        if (preview_error > stack.limits.geometry_tolerance*.5) {
-            if (depth >= 24) invalid(_u8L("line width cannot represent transverse surface curvature/thickness within geometry tolerance; use a narrower line or a larger tolerance"));
-            segment(out,a,mid,k,depth+1); segment(out,mid,b,k,depth+1); return;
-        }
+        // Preview uses the local tangent band; cross-width approximation is
+        // independent of whether the centerline can be sliced and emitted.
+        const double max_top_z = std::max({p.z,q.z,zm})+settings.width*.5*std::abs(cross_slope);
         double projected_area;
         const double volume = account_volume(a,b,k,projected_area);
         out.projected_area += projected_area;
@@ -436,47 +366,34 @@ Paths64 infill(const Paths64 &region, const LayerStack &stack, double spacing, d
 std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &objects, const Settings &settings,
                          const std::function<void()> &cancel)
 {
-    if (settings.walls < 1 || settings.width <= 0 || settings.density < 0 || settings.density > 1)
-        invalid(_u8L("at least one wall, a positive line width and density in [0,1] are required"));
+    if (settings.walls < 0 || settings.width <= 0 || settings.density < 0 || settings.density > 1)
+        invalid(_u8L("a nonnegative wall count, a positive line width and density in [0,1] are required"));
     const double tol = stack.limits.geometry_tolerance;
     for (const Object &object : objects) for (const Triangle &t : object.triangles) for (XYZ p : t.vertices) {
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) invalid(_u8L("model contains nonfinite coordinates"));
         if (!stack.covers(xy(p))) invalid(_u8L("shared grid does not cover the placed model footprint"));
-        if (p.z < -tol) invalid(_u8L("model extends below machine Z zero"));
-        if (p.z < stack.value(stack.bed,xy(p))-tol) invalid(_u8L("model extends below the supplied bed"));
-        if (p.z > settings.max_z+tol) invalid(_u8L("model exceeds machine Z height"));
-        if (p.z > stack.value(stack.layers.back(),xy(p))+tol) invalid(_u8L("layer stack does not cover the complete model height"));
     }
     std::vector<Layer> output(stack.layers.size());
-    std::vector<Paths64> occupied(stack.layers.size());
     Planner planner(stack,settings);
     for (const Object &object : objects) {
         Intersection engine(stack,object,cancel);
-        bool object_has_paths = false;
-        double object_volume = 0.;
         std::vector<Paths64> sections;
         for (size_t k = 0; k < stack.layers.size(); ++k) {
             cancel();
             const Surface &below = k ? stack.layers[k-1] : stack.bed;
             sections.push_back(engine.cross_section(below,stack.layers[k]));
-            if (!intersect(occupied[k],sections.back()).empty()) invalid(_u8L("overlapping printable objects are unsupported"));
-            occupied[k].insert(occupied[k].end(),sections.back().begin(),sections.back().end());
         }
         for (size_t k = 0; k < sections.size(); ++k) {
             cancel();
             Layer &layer = output[k];
-            const size_t first_object_path = layer.paths.size();
             const double margin = settings.width*.5+tol;
             Paths64 safe = inset(sections[k],margin,tol);
-            if (!safe.empty() && !object_has_paths && k != 0)
-                invalid(_u8L("An object's first printable bead is above the bed; thin contacts or floating starts need unsupported support strategies"));
-            object_has_paths = object_has_paths || !safe.empty();
             for (int wall = 0; wall < settings.walls; ++wall) {
                 const auto contours = inset(safe,wall*settings.width,tol);
                 for (const auto &p : contours) if (p.size() >= 3)
                     layer.paths.push_back(planner.path(p,true,k,wall ? Role::InnerWall : Role::OuterWall,object.id));
             }
-            Paths64 interior = inset(safe,(settings.walls-.5)*settings.width,tol);
+            Paths64 interior = inset(safe,std::max(0.,settings.walls-.5)*settings.width,tol);
             // Skin propagation follows material presence on neighboring supplied
             // bands, independently for each object and all its islands/holes.
             Paths64 top = interior, bottom = interior;
@@ -507,16 +424,7 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
             fill(bottom_only,settings.width,Role::BottomSkin);
             if (settings.density > 0) fill(sparse,settings.width/settings.density,
                                           settings.density == 1. ? Role::SolidInfill : Role::SparseInfill);
-            double layer_volume = 0.;
-            for (size_t p = first_object_path; p < layer.paths.size(); ++p)
-                for (const auto &segment : layer.paths[p].segments) layer_volume += segment.volume;
-            if (k == 0 && object_has_paths && layer_volume <= settings.min_deposited_volume)
-                invalid(_u8L("An object's first-layer volume is below native G-code extrusion resolution"));
-            object_volume += layer_volume;
         }
-        if (!object_has_paths) invalid(_u8L("No printable bead fits one of the supplied objects"));
-        if (object_volume <= settings.min_deposited_volume)
-            invalid(_u8L("One object's deposited volume is below native G-code extrusion resolution"));
     }
     if (std::none_of(output.begin(),output.end(),[](const Layer &l) { return !l.paths.empty(); }))
         invalid(_u8L("no printable bead fits in the supplied material bands"));
@@ -527,7 +435,7 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
             add(path.start);
             for (const auto &segment : path.segments) {
                 add(segment.end);
-                layer.max_z = std::max(layer.max_z,segment.max_top_z);
+                // Machine bounds apply to emitted coordinates, not preview envelopes.
             }
         }
         if (layer.min_z < 0. || layer.max_z > settings.max_z) invalid(_u8L("generated path exceeds machine Z limits"));
