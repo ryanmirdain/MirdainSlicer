@@ -231,6 +231,7 @@ private:
 };
 
 class Planner {
+    using Curve = std::array<double,7>;
 public:
     Planner(const LayerStack &s, const Settings &p) : stack(s), settings(p) {}
 
@@ -255,7 +256,15 @@ public:
             cuts.erase(std::unique(cuts.begin(),cuts.end()),cuts.end());
             for (size_t c = 1; c < cuts.size(); ++c) {
                 auto at = [&](double t) { return XY{a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t}; };
-                segment(out,at(cuts[c-1]),at(cuts[c]),k,0);
+                const XY from = at(cuts[c-1]), to = at(cuts[c]);
+                const auto [i,j] = stack.cell({(from.x+to.x)*.5,(from.y+to.y)*.5});
+                const size_t cell = j*(stack.x.size()-1)+i;
+                const Patch &top = stack.layers[k].patches[cell];
+                const Patch &bottom = (k ? stack.layers[k-1] : stack.bed).patches[cell];
+                Patch gap = top;
+                for (size_t n = 0; n < gap.control.size(); ++n)
+                    gap.control[n] -= bottom.control[n];
+                segment(out,from,to,top,top.line(from,to),gap.line(from,to),0);
             }
         }
         return out;
@@ -265,47 +274,63 @@ private:
     const LayerStack &stack;
     const Settings &settings;
 
-    double account_volume(XY a, XY b, size_t k, double &projected_area) const
+    static double midpoint(const Curve &curve)
     {
-        const double length = std::hypot(b.x-a.x,b.y-a.y);
-        // A bicubic span restricted to a line has degree six. Four-point
-        // Gauss-Legendre integrates its gap exactly between grid seams.
-        constexpr std::array<double,4> nodes {.06943184420297371,.33000947820757187,.6699905217924281,.9305681557970262};
-        constexpr std::array<double,4> weights {.17392742256872693,.32607257743127307,.32607257743127307,.17392742256872693};
-        double gap = 0.;
-        for (size_t n = 0; n < 4; ++n)
-            gap += weights[n]*stack.vertical_gap(k,{a.x+(b.x-a.x)*nodes[n],a.y+(b.y-a.y)*nodes[n]});
-        projected_area = settings.width*length;
-        return projected_area*gap;
+        // Degree-six Bernstein basis at t=1/2.
+        constexpr Curve weights {1./64.,6./64.,15./64.,20./64.,15./64.,6./64.,1./64.};
+        double value = 0.;
+        for (size_t n = 0; n < curve.size(); ++n) value += weights[n]*curve[n];
+        return value;
     }
 
-    void segment(Path &out, XY a, XY b, size_t k, unsigned depth)
+    static std::pair<Curve,Curve> split(const Curve &curve)
+    {
+        Curve work = curve, left, right;
+        left.front() = work.front(); right.back() = work.back();
+        for (size_t level = 1; level < curve.size(); ++level) {
+            for (size_t n = 0; n < curve.size()-level; ++n)
+                work[n] = .5*(work[n]+work[n+1]);
+            left[level] = work.front();
+            right[curve.size()-1-level] = work[curve.size()-1-level];
+        }
+        return {left,right};
+    }
+
+    void segment(Path &out, XY a, XY b, const Patch &top, const Curve &curve, const Curve &gap_curve, unsigned depth)
     {
         const XY mid {(a.x+b.x)*.5,(a.y+b.y)*.5};
-        const XYZ p {a.x,a.y,stack.value(stack.layers[k],a)}, q {b.x,b.y,stack.value(stack.layers[k],b)};
-        const double zm = stack.value(stack.layers[k],mid), gap = stack.vertical_gap(k,mid);
-        const auto [i,j] = stack.cell(mid);
-        const auto curve = stack.patch(stack.layers[k],i,j).line(a,b);
+        const XYZ p {a.x,a.y,curve.front()}, q {b.x,b.y,curve.back()};
         double chord_error = 0.;
         for (size_t n = 0; n < curve.size(); ++n)
             chord_error = std::max(chord_error,std::abs(curve[n]-(p.z+(q.z-p.z)*double(n)/6.)));
         if (depth < 32 && (distance(p,q) > stack.limits.max_segment_length-.00018 ||
                            chord_error > stack.limits.chord_tolerance*.5)) {
-            segment(out,a,mid,k,depth+1); segment(out,mid,b,k,depth+1); return;
+            // Subdivision reuses the exact parent polynomials; no grid lookup
+            // or surface restriction is repeated in the recursion.
+            const auto [left,right] = split(curve);
+            const auto [gap_left,gap_right] = split(gap_curve);
+            segment(out,a,mid,top,left,gap_left,depth+1);
+            segment(out,mid,b,top,right,gap_right,depth+1);
+            return;
         }
         const double ds = std::hypot(b.x-a.x,b.y-a.y);
         if (ds < 1e-10) return;
-        const double normal = stack.normal_spacing(k,mid);
-        const XY grad = stack.gradient(stack.layers[k],mid);
+        const double zm = midpoint(curve), gap = midpoint(gap_curve);
+        const XY grad = top.gradient(mid);
+        const double normal = gap/std::sqrt(1.+grad.x*grad.x+grad.y*grad.y);
         const double cross_slope = (-grad.x*(b.y-a.y)+grad.y*(b.x-a.x))/ds;
-        // Preview uses the local tangent band; cross-width approximation is
-        // independent of whether the centerline can be sliced and emitted.
         const double max_top_z = std::max({p.z,q.z,zm})+settings.width*.5*std::abs(cross_slope);
-        double projected_area;
-        const double volume = account_volume(a,b,k,projected_area);
+        // Every degree-six Bernstein basis function integrates to 1/7 on
+        // [0,1]. This is the exact mean gap, without quadrature evaluations.
+        double mean_gap = 0.;
+        for (double coefficient : gap_curve) mean_gap += coefficient;
+        mean_gap /= gap_curve.size();
+        const double projected_area = settings.width*ds;
+        const double volume = projected_area*mean_gap;
         out.projected_area += projected_area;
         out.segments.push_back({q,volume,gap,normal,settings.width*std::sqrt(1.+cross_slope*cross_slope),-cross_slope,max_top_z});
     }
+
 };
 
 Paths64 infill(const Paths64 &region, const LayerStack &stack, double spacing, double angle)
