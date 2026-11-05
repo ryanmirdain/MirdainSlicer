@@ -45,13 +45,24 @@ Surface surface(const Json &j, size_t nx, size_t ny, const std::string &label)
         s.a = number(j.at("a"), label + ".a");
         s.b = number(j.at("b"), label + ".b");
         s.c = number(j.at("c"), label + ".c");
-    } else if (type == "height_grid") {
+    } else if (type == "height_grid" || type == "height_hermite_grid") {
         s.plane = false;
         const auto &rows = j.at("z");
         if (!rows.is_array() || rows.size() != ny) invalid(Slic3r::format(_u8L("%1%.z has the wrong row count"),label));
         for (const auto &row : rows) {
             if (!row.is_array() || row.size() != nx) invalid(Slic3r::format(_u8L("%1%.z has the wrong column count"),label));
             for (const auto &v : row) s.z.push_back(number(v, label + ".z"));
+        }
+        if (type == "height_hermite_grid") {
+            for (const char *key : {"gx","gy"}) {
+                auto &values = key[1] == 'x' ? s.gx : s.gy;
+                const auto &rows = j.at(key);
+                if (rows.size() != ny) invalid(_u8L("Hermite derivative grid has the wrong row count"));
+                for (const auto &row : rows) {
+                    if (row.size() != nx) invalid(_u8L("Hermite derivative grid has the wrong column count"));
+                    for (const auto &v : row) values.push_back(number(v,label+key));
+                }
+            }
         }
         const auto bounds = std::minmax_element(s.z.begin(),s.z.end());
         s.min_z = *bounds.first; s.max_z = *bounds.second;
@@ -197,6 +208,29 @@ LayerStack LayerStack::parse(const std::string &text)
             if (!entry.at("id").is_number_integer() || entry.at("id").get<long long>() != static_cast<long long>(k))
                 invalid(_u8L("layer IDs must be consecutive from zero"));
             out.layers.push_back(surface(entry.at("surface"), out.x.size(), out.y.size(), "layer " + std::to_string(k)));
+            if (entry.contains("level")) out.layers.back().level = number(entry.at("level"),"material scalar level");
+        }
+        if (j.contains("material_field")) {
+            const auto &field = j.at("material_field");
+            for (const auto &v : field.at("vertices")) {
+                if (v.size() != 3) invalid(_u8L("Material field vertices must have three coordinates"));
+                out.field_vertices.push_back({number(v[0],"field x"),number(v[1],"field y"),number(v[2],"field z")});
+            }
+            for (const auto &v : field.at("values")) out.field_values.push_back(number(v,"field scalar"));
+            if (out.field_vertices.empty() || out.field_vertices.size() != out.field_values.size())
+                invalid(_u8L("Material field vertices and values must have matching nonempty sizes"));
+            for (const auto &face : field.at("triangles")) {
+                if (face.size() != 3) invalid(_u8L("Material boundary faces must have three indices"));
+                std::array<size_t,3> ids;
+                for (size_t n = 0; n < 3; ++n) {
+                    ids[n] = face[n].get<size_t>();
+                    if (ids[n] >= out.field_vertices.size()) invalid(_u8L("Material boundary vertex index is out of range"));
+                }
+                out.field_triangles.push_back(ids);
+            }
+            for (size_t k = 0; k < out.layers.size(); ++k)
+                if (out.layers[k].level <= (k ? out.layers[k-1].level : 0.))
+                    invalid(_u8L("Material scalar levels must be strictly increasing"));
         }
         auto sample = [&](const Surface &s, size_t i, size_t j) {
             return s.plane ? s.a*out.x[i]+s.b*out.y[j]+s.c : s.z[j*out.x.size()+i];
@@ -207,8 +241,29 @@ LayerStack LayerStack::parse(const std::string &text)
                 if (!std::isfinite(gap) || gap <= 0.)
                     invalid(Slic3r::format(_u8L("Layer %1%: surfaces must be strictly ordered at grid point %2%,%3%"),k,i,j));
             }
-        const auto wx = spline_weights(out.x), wy = spline_weights(out.y);
+        std::vector<std::vector<double>> wx, wy;
         auto build = [&](Surface &s) {
+            if (s.plane || !s.gx.empty()) {
+                s.min_z = std::numeric_limits<double>::infinity(); s.max_z = -s.min_z;
+                const size_t nx = out.x.size();
+                for (size_t j = 0; j+1 < out.y.size(); ++j) for (size_t i = 0; i+1 < nx; ++i) {
+                    Patch p {out.x[i],out.y[j],out.x[i+1]-out.x[i],out.y[j+1]-out.y[j]};
+                    for (size_t b = 0; b < 4; ++b) for (size_t a = 0; a < 4; ++a) {
+                        const size_t u = a < 2 ? i : i+1, v = b < 2 ? j : j+1;
+                        const double z = sample(s,u,v);
+                        const double gx = s.plane ? s.a : s.gx[v*nx+u];
+                        const double gy = s.plane ? s.b : s.gy[v*nx+u];
+                        const double tx = a == 1 ? p.dx/3. : a == 2 ? -p.dx/3. : 0.;
+                        const double ty = b == 1 ? p.dy/3. : b == 2 ? -p.dy/3. : 0.;
+                        p.control[b*4+a] = z+tx*gx+ty*gy;
+                    }
+                    const auto bounds = p.bounds();
+                    s.min_z = std::min(s.min_z,bounds.first); s.max_z = std::max(s.max_z,bounds.second);
+                    s.patches.push_back(std::move(p));
+                }
+                return;
+            }
+            if (wx.empty()) { wx = spline_weights(out.x); wy = spline_weights(out.y); }
             std::vector<double> rows(out.y.size()*wx.size(),0.);
             for (size_t v = 0; v < out.y.size(); ++v) for (size_t a = 0; a < wx.size(); ++a)
                 for (size_t u = 0; u < out.x.size(); ++u) if (wx[a][u] != 0.)
@@ -228,7 +283,14 @@ LayerStack LayerStack::parse(const std::string &text)
         };
         build(out.bed);
         for (auto &s : out.layers) build(s);
-        j["surface_interpolation"] = "ordered_cubic_bspline_v1";
+        for (size_t k = 0; k < out.layers.size(); ++k) if (!out.layers[k].gx.empty()) {
+            const auto &below = k ? out.layers[k-1] : out.bed;
+            for (size_t p = 0; p < out.layers[k].patches.size(); ++p)
+                for (size_t n = 0; n < 16; ++n)
+                    if (out.layers[k].patches[p].control[n] <= below.patches[p].control[n])
+                        invalid(_u8L("Material-constrained surfaces cross between grid points"));
+        }
+        if (!j.contains("surface_interpolation")) j["surface_interpolation"] = "ordered_cubic_bspline_v1";
         out.source = j.dump();
     } catch (const Json::exception &e) { invalid(e.what()); }
     return out;

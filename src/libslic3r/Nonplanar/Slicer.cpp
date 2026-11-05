@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <set>
@@ -59,6 +60,8 @@ class Intersection {
     const LayerStack &stack;
     const std::function<void()> &cancel;
     std::vector<std::vector<Piece>> cells;
+    struct ScalarTriangle { std::array<XYZ,3> vertices; std::array<double,3> values; };
+    std::vector<ScalarTriangle> material_triangles;
 
     static XYZ cross(XYZ a, XYZ b)
     { return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x}; }
@@ -69,6 +72,18 @@ public:
     Intersection(const LayerStack &s, const Object &object, const std::function<void()> &c)
         : stack(s), cancel(c), cells((s.x.size()-1)*(s.y.size()-1))
     {
+        if (!stack.field_vertices.empty()) {
+            for (const auto &face : stack.field_triangles) {
+                cancel();
+                ScalarTriangle triangle;
+                for (size_t n = 0; n < 3; ++n) {
+                    triangle.vertices[n] = stack.field_vertices[face[n]];
+                    triangle.values[n] = stack.field_values[face[n]];
+                }
+                material_triangles.push_back(std::move(triangle));
+            }
+            return;
+        }
         for (const Triangle &t : object.triangles) {
             cancel();
             XYZ normal = cross(subtract(t.vertices[1],t.vertices[0]),subtract(t.vertices[2],t.vertices[0]));
@@ -128,6 +143,20 @@ public:
             nodes[na].edges.push_back(edges.size()); nodes[nb].edges.push_back(edges.size());
             edges.push_back({na,nb});
         };
+        if (!material_triangles.empty()) {
+            const double level = .5*(below.level+above.level)-boundary_epsilon;
+            for (const auto &triangle : material_triangles) {
+                cancel();
+                std::array<XYZ,2> hits;
+                size_t count = 0;
+                for (size_t n = 0; n < 3; ++n) {
+                    const size_t next = (n+1)%3;
+                    const double a = triangle.values[n]-level, b = triangle.values[next]-level;
+                    if ((a >= 0.) != (b >= 0.)) hits[count++] = mix(triangle.vertices[n],triangle.vertices[next],a/(a-b));
+                }
+                if (count == 2) line(xy(hits[0]),xy(hits[1]));
+            }
+        } else {
         const size_t nx = stack.x.size()-1;
         std::vector<Patch> patches(cells.size());
         std::vector<size_t> steps_x(nx,1), steps_y(stack.y.size()-1,1);
@@ -172,6 +201,7 @@ public:
                 facet({vertices[n],vertices[n+1],vertices[n+sx+2]});
                 facet({vertices[n],vertices[n+sx+2],vertices[n+sx+1]});
             }
+        }
         }
         Paths64 loops;
         for (size_t e = 0; e < edges.size(); ++e) {
