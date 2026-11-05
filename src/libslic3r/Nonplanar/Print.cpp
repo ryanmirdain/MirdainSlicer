@@ -190,6 +190,17 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
     parser.set("first_non_support_filaments",new ConfigOptionInts(first_filaments));
     parser.set("nozzle_diameter_at_nozzle_id",new ConfigOptionFloats{job.settings.nozzle_diameter});
     parser.set("overall_chamber_temperature",config.option<ConfigOptionInts>("chamber_temperature")->values.front());
+    parser.set("min_vitrification_temperature",config.option<ConfigOptionInts>("temperature_vitrification")->values.front());
+    parser.set("is_all_bbl_filament",config.option<ConfigOptionStrings>("filament_vendor")->values.front() == "Bambu Lab");
+    parser.set("max_additional_fan",first(config,"additional_cooling_fan_speed",0.));
+    // No planar timelapse position picker runs for these curved layers.
+    parser.set("has_timelapse_safe_pos",false);
+    parser.set("timelapse_inline_photo",true);
+    parser.set("farthest_point_timelapse_enabled",false);
+    parser.set("timelapse_pos_x",0);
+    parser.set("timelapse_pos_y",0);
+    parser.set("curr_physical_extruder_id",print.config().physical_extruder_map.get_at(0));
+    parser.set("most_used_physical_extruder_id",print.config().physical_extruder_map.get_at(0));
     parser.set("total_layer_count",int(job.layers.size()));
     size_t last_printed = 0, first_printed = 0;
     const Path *finishing_path = nullptr;
