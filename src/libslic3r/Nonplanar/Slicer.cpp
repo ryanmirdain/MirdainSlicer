@@ -471,8 +471,14 @@ std::vector<Layer> slice(const LayerStack &stack, const std::vector<Object> &obj
             if (!safe.empty() && !object_has_paths && k != 0)
                 invalid(_u8L("An object's first printable bead is above the bed; thin contacts or floating starts need unsupported support strategies"));
             object_has_paths = object_has_paths || !safe.empty();
-            if (k > 0 && !difference(safe,sections[k-1]).empty())
-                invalid(_u8L("unsupported overhang or floating island requires bridging/support, which is unavailable in nonplanar mode"));
+            if (k > 0) {
+                const auto unsupported = difference(safe,sections[k-1]);
+                if (!unsupported.empty()) {
+                    const auto bounds = GetBounds(unsupported);
+                    invalid(Slic3r::format(_u8L("layer %1% extends beyond layer %2% by %3% mm² after the wall inset (XY bounds %4%, %5% to %6%, %7% mm); unsupported overhang or floating island"),
+                        k+1,k,Area(unsupported)/(scale*scale),bounds.left/scale,bounds.top/scale,bounds.right/scale,bounds.bottom/scale));
+                }
+            }
             for (int wall = 0; wall < settings.walls; ++wall) {
                 const auto contours = inset(safe,wall*settings.width,tol);
                 for (const auto &p : contours) if (p.size() >= 3)
