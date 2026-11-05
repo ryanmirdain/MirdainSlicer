@@ -182,6 +182,14 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
                            "current_filament_id","current_extruder_id","current_nozzle_id","current_hotend"})
         parser.set(key,0);
     parser.set("current_extruder",0);
+    // Printer scripts still need physical-tool vectors, including unused tools.
+    std::vector<int> first_filaments(print.config().nozzle_diameter.size(),-1);
+    first_filaments.front() = 0;
+    parser.set("first_tools",new ConfigOptionInts(first_filaments));
+    parser.set("first_filaments",new ConfigOptionInts(first_filaments));
+    parser.set("first_non_support_filaments",new ConfigOptionInts(first_filaments));
+    parser.set("nozzle_diameter_at_nozzle_id",new ConfigOptionFloats{job.settings.nozzle_diameter});
+    parser.set("overall_chamber_temperature",config.option<ConfigOptionInts>("chamber_temperature")->values.front());
     parser.set("total_layer_count",int(job.layers.size()));
     size_t last_printed = 0, first_printed = 0;
     const Path *finishing_path = nullptr;
