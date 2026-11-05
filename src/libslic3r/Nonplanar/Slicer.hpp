@@ -44,7 +44,7 @@ struct Job {
     std::vector<Layer> layers;
 };
 
-// Native original-mesh/bilinear intersection, band booleans and swept-volume paths.
+// Native original-mesh/spline contours, 2D toolpaths and local gap integration.
 // Cancellation is supplied by Print, without a GUI or service dependency.
 std::vector<Layer> slice(const LayerStack &, const std::vector<Object> &, const Settings &,
                          const std::function<void()> &cancel);

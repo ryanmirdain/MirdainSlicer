@@ -12,18 +12,22 @@ namespace Slic3r::Nonplanar {
 struct XY { double x, y; };
 struct XYZ { double x, y, z; };
 
-// In one shared grid cell: c + ax*u + ay*v + axy*u*v, in millimeters.
-// u and v are physical offsets from the cell's lower left corner.
+// One tensor-product cubic Bezier span of the shared C2 B-spline surface.
 struct Patch {
-    double x, y, c, ax, ay, axy;
+    double x, y, dx, dy;
+    std::array<double,16> control {};
     double value(XY p) const;
     XY gradient(XY p) const;
+    std::pair<double,double> bounds() const;
+    double linear_error() const;
+    std::array<double,7> line(XY a, XY b) const;
 };
 
 struct Surface {
     bool plane = true;
     double a = 0., b = 0., c = 0.;
-    std::vector<double> z; // row-major, shared grid
+    std::vector<double> z; // row-major input samples
+    std::vector<Patch> patches; // positive-weight, shared-knot spline spans
     double min_z = 0., max_z = 0.; // derived grid bounds; input surfaces are immutable
 };
 

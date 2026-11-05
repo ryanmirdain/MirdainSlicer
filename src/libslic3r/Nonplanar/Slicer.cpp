@@ -48,8 +48,8 @@ std::vector<XYZ> clip_axis(const std::vector<XYZ> &polygon, int axis, double val
     return out;
 }
 
-// A mesh face intersected with a bilinear height patch has the XY equation
-// A + B*u + C*v + D*u*v = 0. Trace that curve, not triangle subdivisions.
+// Intersect the original mesh with a tolerance-bounded tessellation of the
+// shared spline. Only the surface is approximated; model triangles stay intact.
 class Intersection {
     struct Piece {
         std::vector<XYZ> polygon;
@@ -129,23 +129,48 @@ public:
             edges.push_back({na,nb});
         };
         const size_t nx = stack.x.size()-1;
+        std::vector<Patch> patches(cells.size());
+        std::vector<size_t> steps_x(nx,1), steps_y(stack.y.size()-1,1);
+        for (size_t cell = 0; cell < cells.size(); ++cell) {
+            if (cells[cell].empty()) continue;
+            const size_t i = cell%nx, j = cell/nx;
+            patches[cell] = stack.patch(below,i,j);
+            const Patch upper = stack.patch(above,i,j);
+            for (size_t n = 0; n < 16; ++n)
+                patches[cell].control[n] = .5*(patches[cell].control[n]+upper.control[n])-boundary_epsilon;
+            const size_t steps = std::max(size_t(1),size_t(std::ceil(std::sqrt(patches[cell].linear_error()/(stack.limits.geometry_tolerance*.25)))));
+            steps_x[i] = std::max(steps_x[i],steps);
+            steps_y[j] = std::max(steps_y[j],steps);
+        }
+        // Neighbors share edge subdivision counts along each grid axis, so
+        // contours have no hanging vertices. Hessian bounds control height
+        // error without recursively splitting the original mesh faces.
         for (size_t cell = 0; cell < cells.size(); ++cell) {
             cancel();
             if (cells[cell].empty()) continue;
-            const size_t i = cell%nx, j = cell/nx;
-            const Patch lower = stack.patch(below,i,j), upper = stack.patch(above,i,j);
-            const Patch h {lower.x,lower.y,(lower.c+upper.c)*.5-boundary_epsilon,
-                           (lower.ax+upper.ax)*.5,(lower.ay+upper.ay)*.5,(lower.axy+upper.axy)*.5};
-            const std::array<double,4> heights {h.value({stack.x[i],stack.y[j]}),h.value({stack.x[i+1],stack.y[j]}),
-                h.value({stack.x[i],stack.y[j+1]}),h.value({stack.x[i+1],stack.y[j+1]})};
-            const double low = *std::min_element(heights.begin(),heights.end());
-            const double high = *std::max_element(heights.begin(),heights.end());
+            const Patch &h = patches[cell];
+            const auto [low,high] = h.bounds();
             auto first = std::lower_bound(cells[cell].begin(),cells[cell].end(),low,
                 [](const Piece &p, double z) { return p.max_z < z; });
-            for (auto it = first; it != cells[cell].end(); ++it) {
-                const Piece &piece = *it;
-                if (piece.min_z > high) continue;
-                trace(piece,h,line);
+            if (first == cells[cell].end() || std::none_of(first,cells[cell].end(),[&](const Piece &p) { return p.min_z <= high; })) continue;
+            const size_t sx = steps_x[cell%nx], sy = steps_y[cell/nx];
+            std::vector<XYZ> vertices((sx+1)*(sy+1));
+            for (size_t v = 0; v <= sy; ++v) for (size_t u = 0; u <= sx; ++u) {
+                const XY p {h.x+h.dx*double(u)/sx,h.y+h.dy*double(v)/sy};
+                vertices[v*(sx+1)+u] = {p.x,p.y,h.value(p)};
+            }
+            auto facet = [&](const std::array<XYZ,3> &triangle) {
+                const double lo = std::min({triangle[0].z,triangle[1].z,triangle[2].z});
+                const double hi = std::max({triangle[0].z,triangle[1].z,triangle[2].z});
+                const auto begin = std::lower_bound(first,cells[cell].end(),lo,
+                    [](const Piece &p, double z) { return p.max_z < z; });
+                for (auto it = begin; it != cells[cell].end(); ++it)
+                    if (it->min_z <= hi) trace(*it,triangle,line);
+            };
+            for (size_t v = 0; v < sy; ++v) for (size_t u = 0; u < sx; ++u) {
+                const size_t n = v*(sx+1)+u;
+                facet({vertices[n],vertices[n+1],vertices[n+sx+2]});
+                facet({vertices[n],vertices[n+sx+2],vertices[n+sx+1]});
             }
         }
         Paths64 loops;
@@ -171,101 +196,37 @@ public:
     }
 
 private:
-    template<class Emit> void trace(const Piece &piece, const Patch &h, Emit emit)
+    template<class Emit> void trace(const Piece &piece, const std::array<XYZ,3> &triangle, Emit emit)
     {
+        const XYZ origin = piece.polygon.front();
+        std::array<double,3> residual;
+        for (size_t n = 0; n < 3; ++n) residual[n] = dot(subtract(triangle[n],origin),piece.normal);
+        if (*std::min_element(residual.begin(),residual.end()) > 0. ||
+            *std::max_element(residual.begin(),residual.end()) < 0.) return;
         std::vector<XYZ> hits;
         auto add = [&](XYZ p) {
-            for (XYZ q : hits) if (distance(p,q) < 1e-8) return;
+            for (XYZ q : hits) if (distance(p,q) < 1e-10) return;
             hits.push_back(p);
         };
+        for (size_t n = 0; n < 3; ++n) {
+            const size_t next = (n+1)%3;
+            if (std::abs(residual[n]) < 1e-12) add(triangle[n]);
+            if ((residual[n] >= 0.) != (residual[next] >= 0.))
+                add(mix(triangle[n],triangle[next],residual[n]/(residual[n]-residual[next])));
+        }
+        if (hits.size() != 2) return;
+        double enter = 0., leave = 1.;
         for (size_t n = 0; n < piece.polygon.size(); ++n) {
-            const XYZ a = piece.polygon[n], b = piece.polygon[(n+1)%piece.polygon.size()];
-            auto f = [&](double t) { XYZ p = mix(a,b,t); return p.z-h.value(xy(p)); };
-            const double c = f(0.), end = f(1.), mid = f(.5);
-            const double qa = 2.*(end+c-2.*mid), qb = end-c-qa;
-            auto root = [&](double t) {
-                if (t >= -1e-10 && t <= 1.+1e-10) add(mix(a,b,std::clamp(t,0.,1.)));
-            };
-            if (std::abs(c) < 1e-10) add(a);
-            if (std::abs(end) < 1e-10) add(b);
-            if (std::abs(qa) < 1e-13) {
-                if (std::abs(qb) > 1e-13) root(-c/qb);
-            } else {
-                const double discriminant = qb*qb-4.*qa*c;
-                if (discriminant >= 0.) {
-                    const double q = -.5*(qb+std::copysign(std::sqrt(discriminant),qb));
-                    if (q != 0.) { root(q/qa); root(c/q); }
-                    else root(-qb/(2.*qa));
-                }
+            const XYZ a = piece.polygon[n], edge = subtract(piece.polygon[(n+1)%piece.polygon.size()],a);
+            const double f0 = dot(cross(edge,subtract(hits[0],a)),piece.normal);
+            const double f1 = dot(cross(edge,subtract(hits[1],a)),piece.normal);
+            if (f0 < 0. && f1 < 0.) return;
+            if ((f0 >= 0.) != (f1 >= 0.)) {
+                const double t = f0/(f0-f1);
+                if (f0 < 0.) enter = std::max(enter,t); else leave = std::min(leave,t);
             }
         }
-        if (hits.size() < 2) return;
-        const XYZ n = piece.normal, origin = piece.polygon.front();
-        const double A = n.x*(h.x-origin.x)+n.y*(h.y-origin.y)+n.z*(h.c-origin.z);
-        const double B = n.x+n.z*h.ax, C = n.y+n.z*h.ay, D = n.z*h.axy;
-        // Choose the graph direction with the greater boundary extent. Both
-        // directions describe the same conic; vertical faces remain supported.
-        double xmin = hits[0].x, xmax = xmin, ymin = hits[0].y, ymax = ymin;
-        for (XYZ p : hits) {
-            xmin = std::min(xmin,p.x); xmax = std::max(xmax,p.x);
-            ymin = std::min(ymin,p.y); ymax = std::max(ymax,p.y);
-        }
-        const bool along_x = xmax-xmin >= ymax-ymin;
-        const double linear = along_x ? B : C, denominator = along_x ? C : B;
-        auto coordinate = [&](XYZ p) { return along_x ? p.x-h.x : p.y-h.y; };
-        auto at = [&](double t) {
-            const double other = -(A+linear*t)/(denominator+D*t);
-            return along_x ? XY{h.x+t,h.y+other} : XY{h.x+other,h.y+t};
-        };
-        auto inside = [&](XY p) {
-            const XYZ q {p.x,p.y,h.value(p)};
-            for (size_t v = 0; v < piece.polygon.size(); ++v) {
-                const XYZ a = piece.polygon[v], b = piece.polygon[(v+1)%piece.polygon.size()];
-                if (dot(cross(subtract(b,a),subtract(q,a)),n) < -1e-8) return false;
-            }
-            return true;
-        };
-        // A factored conic consists of two straight branches. Handle each
-        // branch separately so the graph's removable pole does not lose a cut.
-        if (D != 0. && std::abs(A*D-B*C) <= 1e-14*(std::abs(A*D)+std::abs(B*C)+1e-20)) {
-            for (int axis = 0; axis < 2; ++axis) {
-                const double fixed = axis ? -B/D+h.y : -C/D+h.x;
-                std::vector<XYZ> branch;
-                for (XYZ p : hits)
-                    if (std::abs((axis ? p.y : p.x)-fixed) < 1e-7) branch.push_back(p);
-                std::sort(branch.begin(),branch.end(),[&](XYZ a, XYZ b) { return axis ? a.x < b.x : a.y < b.y; });
-                for (size_t v = 1; v < branch.size(); ++v) {
-                    const XY a = xy(branch[v-1]), b = xy(branch[v]);
-                    if (inside({(a.x+b.x)*.5,(a.y+b.y)*.5})) emit(a,b);
-                }
-            }
-            return;
-        }
-        std::sort(hits.begin(),hits.end(),[&](XYZ a, XYZ b) { return coordinate(a) < coordinate(b); });
-        for (size_t v = 1; v < hits.size(); ++v) {
-            const double a = coordinate(hits[v-1]), b = coordinate(hits[v]);
-            if (b-a < 1e-10) continue;
-            if (D != 0. && -denominator/D > a && -denominator/D < b) continue;
-            const XY mid = at((a+b)*.5);
-            if (!std::isfinite(mid.x) || !std::isfinite(mid.y) || !inside(mid)) continue;
-            // Sample only the intersection curve. For this rational graph the
-            // maximum chord deviation occurs where its derivative matches the
-            // chord slope; evaluate that point rather than subdividing faces.
-            auto curve = [&](auto &&self, double ta, double tb, XY pa, XY pb, unsigned depth) -> void {
-                double split = (ta+tb)*.5;
-                const double da = denominator+D*ta, db = denominator+D*tb;
-                if (D != 0. && da*db > 0.)
-                    split = (std::copysign(std::sqrt(da*db),da)-denominator)/D;
-                const XY pm = at(split);
-                const double dx = pb.x-pa.x, dy = pb.y-pa.y;
-                const double length = std::hypot(dx,dy);
-                const double error = length ? std::abs(dx*(pm.y-pa.y)-dy*(pm.x-pa.x))/length : 0.;
-                if (error > stack.limits.geometry_tolerance*.25 && depth < 32) {
-                    self(self,ta,split,pa,pm,depth+1); self(self,split,tb,pm,pb,depth+1);
-                } else emit(pa,pb);
-            };
-            curve(curve,a,b,xy(hits[v-1]),xy(hits[v]),0);
-        }
+        if (enter < leave) emit(xy(mix(hits[0],hits[1],enter)),xy(mix(hits[0],hits[1],leave)));
     }
 };
 
@@ -286,7 +247,7 @@ public:
         for (size_t n = 1; n < points.size()+size_t(closed); ++n) {
             const XY a = real(points[(seam+n-1)%points.size()]), b = real(points[(seam+n)%points.size()]);
             // Split at every grid seam before curvature/flow subdivision. A
-            // bilinear segment is quadratic within a cell, never across cells.
+            // spline span is polynomial within a cell, never across spans.
             std::vector<double> cuts {0.,1.};
             if (a.x != b.x) for (double x : stack.x) { const double t = (x-a.x)/(b.x-a.x); if (t > 0 && t < 1) cuts.push_back(t); }
             if (a.y != b.y) for (double y : stack.y) { const double t = (y-a.y)/(b.y-a.y); if (t > 0 && t < 1) cuts.push_back(t); }
@@ -307,10 +268,13 @@ private:
     double account_volume(XY a, XY b, size_t k, double &projected_area) const
     {
         const double length = std::hypot(b.x-a.x,b.y-a.y);
-        const XY mid {(a.x+b.x)*.5,(a.y+b.y)*.5};
-        // Within a grid cell the vertical gap along a straight XY segment is
-        // quadratic. Simpson integration is exact, with no bead-footprint booleans.
-        const double gap = (stack.vertical_gap(k,a)+4.*stack.vertical_gap(k,mid)+stack.vertical_gap(k,b))/6.;
+        // A bicubic span restricted to a line has degree six. Four-point
+        // Gauss-Legendre integrates its gap exactly between grid seams.
+        constexpr std::array<double,4> nodes {.06943184420297371,.33000947820757187,.6699905217924281,.9305681557970262};
+        constexpr std::array<double,4> weights {.17392742256872693,.32607257743127307,.32607257743127307,.17392742256872693};
+        double gap = 0.;
+        for (size_t n = 0; n < 4; ++n)
+            gap += weights[n]*stack.vertical_gap(k,{a.x+(b.x-a.x)*nodes[n],a.y+(b.y-a.y)*nodes[n]});
         projected_area = settings.width*length;
         return projected_area*gap;
     }
@@ -320,7 +284,11 @@ private:
         const XY mid {(a.x+b.x)*.5,(a.y+b.y)*.5};
         const XYZ p {a.x,a.y,stack.value(stack.layers[k],a)}, q {b.x,b.y,stack.value(stack.layers[k],b)};
         const double zm = stack.value(stack.layers[k],mid), gap = stack.vertical_gap(k,mid);
-        const double chord_error = std::abs(zm-(p.z+q.z)*.5);
+        const auto [i,j] = stack.cell(mid);
+        const auto curve = stack.patch(stack.layers[k],i,j).line(a,b);
+        double chord_error = 0.;
+        for (size_t n = 0; n < curve.size(); ++n)
+            chord_error = std::max(chord_error,std::abs(curve[n]-(p.z+(q.z-p.z)*double(n)/6.)));
         if (depth < 32 && (distance(p,q) > stack.limits.max_segment_length-.00018 ||
                            chord_error > stack.limits.chord_tolerance*.5)) {
             segment(out,a,mid,k,depth+1); segment(out,mid,b,k,depth+1); return;
