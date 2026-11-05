@@ -205,6 +205,9 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
     parser.set("layer_z",job.layers[first_printed].max_z);
     parser.set("max_layer_z",max_printed_z);
     parser.set("max_print_z",std::ceil(max_printed_z));
+    double first_layer_area = 0.;
+    for (const auto &path : job.layers[first_printed].paths) first_layer_area += path.projected_area;
+    parser.set("hold_chamber_temp_for_flat_print",max_printed_z > 0. && max_printed_z < .3 && first_layer_area > 40000.);
     parser.set("max_print_height",job.settings.max_z);
     parser.set("z_offset",0.);
     parser.set("model_name",print.get_model_name());
