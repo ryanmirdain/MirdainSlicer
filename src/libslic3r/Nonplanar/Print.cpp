@@ -297,13 +297,16 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
         << filament_start << '\n' << writer.preamble() << writer.reset_e(true);
     double printed_max = job.stack.bounds(job.stack.bed).second;
     double volume = 0.;
+    int64_t previous_feed = -1;
     auto clear_travel = [&](const Vec3d &target) {
         const double safe_z = std::min(job.settings.max_z,
             std::max(printed_max,target.z())+std::max(1.,job.stack.limits.max_gap)+tol);
-        out << writer.retract() << writer.set_speed(xy_travel*60.)
+        out << writer.retract()
             << writer.travel_to_z(safe_z,"nonplanar clearance",true)
             << writer.travel_to_xyz({target.x(),target.y(),safe_z},"nonplanar travel",true)
             << writer.travel_to_xyz(target,"nonplanar approach",true) << writer.unretract();
+        // Travel and retraction emit their own modal feed rates.
+        previous_feed = -1;
     };
     for (size_t k = 0; k < job.layers.size(); ++k) {
         if (print.canceled()) throw CanceledException();
@@ -352,7 +355,19 @@ std::string export_gcode(Print &print, const Job &job, const std::string &path, 
                 if (segment.volume == 0.) { clear_travel(end); previous = end; continue; }
                 const double maximum_feed = segment_feed(path_data,segment,previous,k);
                 const double feed = std::min(maximum_feed,std::max(first(config,"slow_down_min_speed",0.),maximum_feed*cooling_scale));
-                out << writer.set_speed(feed*60.) << writer.extrude_to_xyz(end,segment.volume*ratio/filament_area);
+                std::string move = writer.extrude_to_xyz(end,segment.volume*ratio/filament_area);
+                const double F = feed*60.;
+                const int64_t formatted_feed = std::llround(F*GCodeFormatter::pow_10[GCodeFormatter::F_EXPORT_DIGITS]);
+                if (formatted_feed != previous_feed) {
+                    // Reuse the writer's formatting and speed state, but put
+                    // the changed F word on this move instead of a separate G1.
+                    std::string speed = writer.set_speed(F);
+                    speed.erase(0,2); // G1
+                    speed.pop_back(); // newline
+                    move.insert(2,speed);
+                    previous_feed = formatted_feed;
+                }
+                out << move;
                 printed_max = std::max(printed_max,segment.max_top_z); volume += segment.volume*ratio;
                 previous = end;
             }
