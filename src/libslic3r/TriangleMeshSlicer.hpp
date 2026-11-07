@@ -81,6 +81,12 @@ std::vector<ExPolygons>         slice_mesh_ex(
     const MeshSlicingParamsEx        &params,
     std::function<void()>             throw_on_cancel = []{});
 
+// Shared contour closing, fill rules and simplification after mesh intersection.
+std::vector<ExPolygons> slice_mesh_ex(
+    std::vector<Polygons> layers,
+    const MeshSlicingParamsEx &params,
+    std::function<void()> throw_on_cancel = []{});
+
 inline std::vector<ExPolygons>  slice_mesh_ex(
     const indexed_triangle_set       &mesh,
     const std::vector<float>         &zs,

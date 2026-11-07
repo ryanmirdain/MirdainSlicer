@@ -10,6 +10,7 @@
     "units": {"const": "mm"},
     "coordinate_system": {"const": "plate_world_xyz"},
     "plate_index": {"type": "integer", "minimum": 0},
+    "interpolate": {"type": "boolean", "default": true, "description": "Use cubic surface reconstruction between XY grid points. False connects samples with planar triangles and ignores supplied derivatives. Interpolation between layer heights remains linear."},
     "grid": {
       "type": "object", "required": ["x", "y"],
       "properties": {"x": {"$ref": "#/$defs/axis"}, "y": {"$ref": "#/$defs/axis"}}

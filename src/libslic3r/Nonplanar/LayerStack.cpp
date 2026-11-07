@@ -122,6 +122,11 @@ std::array<double,4> restrict_curve(const std::array<double,4> &control, double 
 
 double Patch::value(XY p) const
 {
+    if (linear) {
+        const double u = (p.x-x)/dx, v = (p.y-y)/dy;
+        return u >= v ? (1.-u)*control[0] + (u-v)*control[3] + v*control[15]
+                      : (1.-v)*control[0] + (v-u)*control[12] + u*control[15];
+    }
     const auto bx = basis((p.x-x)/dx), by = basis((p.y-y)/dy);
     double value = 0.;
     for (size_t j = 0; j < 4; ++j) for (size_t i = 0; i < 4; ++i)
@@ -131,6 +136,9 @@ double Patch::value(XY p) const
 XY Patch::gradient(XY p) const
 {
     const double u = (p.x-x)/dx, v = (p.y-y)/dy;
+    if (linear)
+        return u >= v ? XY{(control[3]-control[0])/dx, (control[15]-control[3])/dy}
+                      : XY{(control[15]-control[12])/dx, (control[12]-control[0])/dy};
     const auto bx = basis(u), by = basis(v), gx = derivative(u), gy = derivative(v);
     XY g {0.,0.};
     for (size_t j = 0; j < 4; ++j) for (size_t i = 0; i < 4; ++i) {
@@ -146,6 +154,7 @@ std::pair<double,double> Patch::bounds() const
 }
 double Patch::linear_error() const
 {
+    if (linear) return 0.;
     double xx = 0., yy = 0., xy = 0.;
     for (size_t j = 0; j < 4; ++j) for (size_t i = 0; i < 2; ++i)
         xx = std::max(xx,6.*std::abs(control[j*4+i+2]-2.*control[j*4+i+1]+control[j*4+i]));
@@ -180,6 +189,7 @@ LayerStack LayerStack::parse(const std::string &text)
     LayerStack out;
     try {
         Json j = Json::parse(text);
+        const bool interpolate = j.value("interpolate", true);
         if (j.at("format") != "orca_nonplanar_layers") invalid(_u8L("unknown format"));
         if (!j.at("version").is_number_integer() || j.at("version") != 1) invalid(_u8L("version must be 1"));
         if (j.at("units") != "mm") invalid(_u8L("units must be mm"));
@@ -235,20 +245,29 @@ LayerStack LayerStack::parse(const std::string &text)
         auto sample = [&](const Surface &s, size_t i, size_t j) {
             return s.plane ? s.a*out.x[i]+s.b*out.y[j]+s.c : s.z[j*out.x.size()+i];
         };
-        for (size_t k = 0; k < out.layers.size(); ++k)
+        // Layer extensions may cross the bed outside printable material.
+        // Require ordering only between supplied layer surfaces.
+        for (size_t k = 1; k < out.layers.size(); ++k)
             for (size_t j = 0; j < out.y.size(); ++j) for (size_t i = 0; i < out.x.size(); ++i) {
-                const double gap = sample(out.layers[k],i,j)-sample(k ? out.layers[k-1] : out.bed,i,j);
+                const double gap = sample(out.layers[k],i,j)-sample(out.layers[k-1],i,j);
                 if (!std::isfinite(gap) || gap <= 0.)
                     invalid(Slic3r::format(_u8L("Layer %1%: surfaces must be strictly ordered at grid point %2%,%3%"),k,i,j));
             }
         std::vector<std::vector<double>> wx, wy;
         auto build = [&](Surface &s) {
-            if (s.plane || !s.gx.empty()) {
+            if (s.plane || !s.gx.empty() || !interpolate) {
                 s.min_z = std::numeric_limits<double>::infinity(); s.max_z = -s.min_z;
                 const size_t nx = out.x.size();
                 for (size_t j = 0; j+1 < out.y.size(); ++j) for (size_t i = 0; i+1 < nx; ++i) {
                     Patch p {out.x[i],out.y[j],out.x[i+1]-out.x[i],out.y[j+1]-out.y[j]};
+                    p.linear = !interpolate;
                     for (size_t b = 0; b < 4; ++b) for (size_t a = 0; a < 4; ++a) {
+                        if (!interpolate) {
+                            const double u = double(a)/3., v = double(b)/3.;
+                            p.control[b*4+a] = (1.-v)*((1.-u)*sample(s,i,j)+u*sample(s,i+1,j))
+                                              + v*((1.-u)*sample(s,i,j+1)+u*sample(s,i+1,j+1));
+                            continue;
+                        }
                         const size_t u = a < 2 ? i : i+1, v = b < 2 ? j : j+1;
                         const double z = sample(s,u,v);
                         const double gx = s.plane ? s.a : s.gx[v*nx+u];
@@ -283,8 +302,8 @@ LayerStack LayerStack::parse(const std::string &text)
         };
         build(out.bed);
         for (auto &s : out.layers) build(s);
-        for (size_t k = 0; k < out.layers.size(); ++k) if (!out.layers[k].gx.empty()) {
-            const auto &below = k ? out.layers[k-1] : out.bed;
+        for (size_t k = 1; k < out.layers.size(); ++k) if (!out.layers[k].gx.empty()) {
+            const auto &below = out.layers[k-1];
             for (size_t p = 0; p < out.layers[k].patches.size(); ++p)
                 for (size_t n = 0; n < 16; ++n)
                     if (out.layers[k].patches[p].control[n] <= below.patches[p].control[n])

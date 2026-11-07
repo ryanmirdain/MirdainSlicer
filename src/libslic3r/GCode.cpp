@@ -4848,9 +4848,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     file.write_format(";%s%s\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role).c_str(), ExtrusionEntity::role_to_string(erCustom).c_str());
 
     // Mark the start of the machine end g-code so the usage-block builder closes its open blocks here and
-    // ignores filament changes inside the end g-code. Same enable_pre_heating gate as the start marker →
-    // byte-frozen fleet unaffected.
-    if (m_config.enable_pre_heating.value)
+    // ignores filament changes inside the end g-code. Nonplanar exports also need
+    // this boundary to leave machine shutdown outside the inverse mapping.
+    if (m_config.enable_pre_heating.value || print.nonplanar())
         file.write_format(";%s\n", GCodeProcessor::Machine_End_GCode_Start_Tag.c_str());
 
     // Process filament-specific gcode in extruder order.
@@ -7646,7 +7646,7 @@ LayerResult GCode::process_layer(
                 if (m_config.reduce_crossing_wall)
                     m_avoid_crossing_perimeters.init_layer(*m_layer);
 
-                if (this->config().gcode_label_objects) {
+                if (this->config().gcode_label_objects || print.nonplanar()) {
                     gcode += std::string("; printing object ") + instance_to_print.print_object.model_object()->name +
                              " id:" + std::to_string(instance_to_print.print_object.get_id()) + " copy " +
                              std::to_string(inst.id) + "\n";
@@ -7801,7 +7801,7 @@ LayerResult GCode::process_layer(
                     gcode += this->extrude_infill(print,by_region_specific, true);
                 }
 
-                if (this->config().gcode_label_objects) {
+                if (this->config().gcode_label_objects || print.nonplanar()) {
                     gcode += std::string("; stop printing object ") +
                              instance_to_print.print_object.model_object()->name +
                              " id:" + std::to_string(instance_to_print.print_object.get_id()) + " copy " +
@@ -7880,7 +7880,7 @@ LayerResult GCode::process_layer(
                 if (m_config.reduce_crossing_wall)
                     m_avoid_crossing_perimeters.init_layer(*m_layer);
 
-                if (this->config().gcode_label_objects) {
+                if (this->config().gcode_label_objects || print.nonplanar()) {
                     gcode += std::string("; printing object ") + instance_to_print.print_object.model_object()->name +
                              " id:" + std::to_string(instance_to_print.print_object.get_id()) + " copy " +
                              std::to_string(inst.id) + "\n";

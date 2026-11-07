@@ -2000,7 +2000,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             // Orca: Updated for XYZ filament shrink compensation
             // Belt printers: force each instance into its own PrintObject so each
             // gets independent layer Z values (its bed position is folded into them).
-            bool belt_force_separate = m_config.belt_printer.value;
+            bool belt_force_separate = m_config.belt_printer.value || nonplanar();
             model_object_status.print_instances = print_objects_from_model_object(*model_object, this->shrinkage_compensation(), belt_force_separate);
             std::vector<const PrintObjectStatus*> old;
             old.reserve(print_object_status_db.count(*model_object));

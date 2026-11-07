@@ -32,6 +32,7 @@ set(lisbslic3r_sources
     Nonplanar/Slicer.cpp
     Nonplanar/Slicer.hpp
     Nonplanar/Print.cpp
+    Nonplanar/Unwarp.cpp
     Nonplanar/Print.hpp
     AABBMesh.cpp
     AABBMesh.hpp

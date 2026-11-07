@@ -398,5 +398,6 @@ src/slic3r/GUI/Widgets/StepCtrl.cpp
 src/libslic3r/Nonplanar/Print.cpp
 src/libslic3r/Nonplanar/LayerStack.cpp
 src/libslic3r/Nonplanar/Slicer.cpp
+src/libslic3r/Nonplanar/Unwarp.cpp
 src/libslic3r/GCode/GCodeProcessor.cpp
 src/OrcaSlicer.cpp

@@ -12,10 +12,11 @@ namespace Slic3r::Nonplanar {
 struct XY { double x, y; };
 struct XYZ { double x, y, z; };
 
-// One tensor-product cubic Bezier span of the shared C2 B-spline surface.
+// One cubic Bezier span, or two planar triangles when linear is set.
 struct Patch {
     double x, y, dx, dy;
     std::array<double,16> control {};
+    bool linear = false; // Two planar triangles sharing the cell's lower-left/upper-right diagonal.
     double value(XY p) const;
     XY gradient(XY p) const;
     std::pair<double,double> bounds() const;

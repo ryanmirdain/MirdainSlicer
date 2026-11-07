@@ -7,6 +7,7 @@
 #include <cassert>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <math.h>
 #include <cmath>
 #include <iterator>
@@ -28,6 +29,7 @@
 #include "Point.hpp"
 #include "Polygon.hpp"
 #include "Print.hpp"
+#include "Nonplanar/Print.hpp"
 #include "BeltTransform.hpp"
 #include "BeltSliceStrategy.hpp"
 #include "Geometry.hpp"
@@ -110,7 +112,8 @@ static std::vector<ExPolygons> slice_volume(
     const ModelVolume             &volume,
     const std::vector<float>      &zs,
     const MeshSlicingParamsEx     &params,
-    const std::function<void()>   &throw_on_cancel_callback)
+    const std::function<void()>   &throw_on_cancel_callback,
+    const Nonplanar::SliceContext *nonplanar = nullptr)
 {
     std::vector<ExPolygons> layers;
     if (! zs.empty()) {
@@ -120,7 +123,8 @@ static std::vector<ExPolygons> slice_volume(
             params2.trafo = params2.trafo * volume.get_matrix();
             if (params2.trafo.rotation().determinant() < 0.)
                 its_flip_triangles(its);
-            layers = slice_mesh_ex(its, zs, params2, throw_on_cancel_callback);
+            layers = nonplanar ? Nonplanar::slice_volume(its, zs, params2, *nonplanar, throw_on_cancel_callback)
+                               : slice_mesh_ex(its, zs, params2, throw_on_cancel_callback);
             throw_on_cancel_callback();
         }
     }
@@ -134,13 +138,14 @@ static std::vector<ExPolygons> slice_volume(
     const std::vector<float>                    &z,
     const std::vector<t_layer_height_range>     &ranges,
     const MeshSlicingParamsEx                   &params,
-    const std::function<void()>                 &throw_on_cancel_callback)
+    const std::function<void()>                 &throw_on_cancel_callback,
+    const Nonplanar::SliceContext              *nonplanar = nullptr)
 {
     std::vector<ExPolygons> out;
     if (! z.empty() && ! ranges.empty()) {
         if (ranges.size() == 1 && z.front() >= ranges.front().first && z.back() < ranges.front().second) {
             // All layers fit into a single range.
-            out = slice_volume(volume, z, params, throw_on_cancel_callback);
+            out = slice_volume(volume, z, params, throw_on_cancel_callback, nonplanar);
         } else {
             std::vector<float>                     z_filtered;
             std::vector<std::pair<size_t, size_t>> n_filtered;
@@ -156,7 +161,7 @@ static std::vector<ExPolygons> slice_volume(
                     n_filtered.emplace_back(std::make_pair(first, i));
             }
             if (! n_filtered.empty()) {
-                std::vector<ExPolygons> layers = slice_volume(volume, z_filtered, params, throw_on_cancel_callback);
+                std::vector<ExPolygons> layers = slice_volume(volume, z_filtered, params, throw_on_cancel_callback, nonplanar);
                 out.assign(z.size(), ExPolygons());
                 i = 0;
                 for (const std::pair<size_t, size_t> &span : n_filtered)
@@ -185,7 +190,8 @@ static std::vector<VolumeSlices> slice_volumes_inner(
     const std::vector<PrintObjectRegions::LayerRangeRegions> &layer_ranges,
     const std::vector<float>                                 &zs,
     const std::function<void()>                              &throw_on_cancel_callback,
-    double                                                   *out_belt_min_z = nullptr)
+    double                                                   *out_belt_min_z = nullptr,
+    const Nonplanar::SliceContext                            *nonplanar = nullptr)
 {
     model_volumes_sort_by_id(model_volumes);
 
@@ -249,7 +255,7 @@ static std::vector<VolumeSlices> slice_volumes_inner(
                 if (const PrintObjectRegions::LayerRangeRegions &layer_range = layer_ranges.front(); layer_range.has_volume(model_volume->id())) {
                     out.push_back({
                         model_volume->id(),
-                        slice_volume(*model_volume, zs, params, throw_on_cancel_callback)
+                        slice_volume(*model_volume, zs, params, throw_on_cancel_callback, nonplanar)
                     });
                 }
             } else {
@@ -260,7 +266,7 @@ static std::vector<VolumeSlices> slice_volumes_inner(
                 if (! slicing_ranges.empty())
                     out.push_back({
                         model_volume->id(),
-                        slice_volume(*model_volume, zs, slicing_ranges, params, throw_on_cancel_callback)
+                        slice_volume(*model_volume, zs, slicing_ranges, params, throw_on_cancel_callback, nonplanar)
                     });
             }
             if (! out.empty() && out.back().slices.empty())
@@ -908,7 +914,17 @@ void PrintObject::slice()
     m_belt_min_z              = 0.;
     m_belt_global_z_offset    = 0.;
     this->clear_layers();
-    m_layers = new_layers(this, generate_object_layers(m_slicing_params, layer_height_profile, m_config.precise_z_height.value));
+    std::vector<coordf_t> object_layers;
+    if (m_print->nonplanar()) {
+        const auto &job = *m_print->m_nonplanar_job;
+        for (size_t layer = 0; layer < job.stack.layers.size(); ++layer) {
+            object_layers.push_back(layer ? job.layer_z(layer - 1) : 0.);
+            object_layers.push_back(job.layer_z(layer));
+        }
+    } else {
+        object_layers = generate_object_layers(m_slicing_params, layer_height_profile, m_config.precise_z_height.value);
+    }
+    m_layers = new_layers(this, object_layers);
     this->slice_volumes();
     m_print->throw_if_canceled();
 
@@ -1349,6 +1365,13 @@ void PrintObject::slice_volumes()
     const Print *print                      = this->print();
     const auto   throw_on_cancel_callback   = std::function<void()>([print](){ print->throw_if_canceled(); });
 
+    std::optional<Nonplanar::SliceContext> nonplanar;
+    if (print->nonplanar()) {
+        const Point shift = this->instances().front().shift_without_plate_offset();
+        nonplanar.emplace(Nonplanar::SliceContext{*print->m_nonplanar_job,
+                                                Vec2d(unscale<double>(shift.x()), unscale<double>(shift.y()))});
+    }
+
     // Clear old LayerRegions, allocate for new PrintRegions.
     for (Layer* layer : m_layers) {
         //BBS: should delete all LayerRegionPtr to avoid memory leak
@@ -1368,7 +1391,7 @@ void PrintObject::slice_volumes()
         objSliceByVolume = slice_volumes_inner(
             print->config(), this->config(), this->trafo_centered(),
             this->model_object()->volumes, m_shared_regions->layer_ranges, slice_zs, throw_on_cancel_callback,
-            &m_belt_min_z);
+            &m_belt_min_z, nonplanar ? &*nonplanar : nullptr);
     }
 
     //BBS: "model_part" volumes are grouded according to their connections
@@ -1760,11 +1783,17 @@ std::vector<Polygons> PrintObject::slice_support_volumes(const ModelVolumeType m
         bool               merge = false;
         const Print       *print = this->print();
         auto               throw_on_cancel_callback = std::function<void()>([print](){ print->throw_if_canceled(); });
+        std::optional<Nonplanar::SliceContext> nonplanar;
+        if (print->nonplanar()) {
+            const Point shift = this->instances().front().shift_without_plate_offset();
+            nonplanar.emplace(Nonplanar::SliceContext{*print->m_nonplanar_job,
+                                                    Vec2d(unscale<double>(shift.x()), unscale<double>(shift.y()))});
+        }
         MeshSlicingParamsEx params;
         params.trafo = this->trafo_sliced();
         for (; it_volume != it_volume_end; ++ it_volume)
             if ((*it_volume)->type() == model_volume_type) {
-                std::vector<ExPolygons> slices2 = slice_volume(*(*it_volume), zs, params, throw_on_cancel_callback);
+                std::vector<ExPolygons> slices2 = slice_volume(*(*it_volume), zs, params, throw_on_cancel_callback, nonplanar ? &*nonplanar : nullptr);
                 if (slices.empty()) {
                     slices.reserve(slices2.size());
                     for (ExPolygons &src : slices2)
@@ -1810,7 +1839,13 @@ std::vector<ExPolygons> PrintObject::slice_single_volume_regions(const ModelVolu
     MeshSlicingParamsEx params;
     params.trafo = this->trafo_sliced();
     const Print *print = this->print();
-    return slice_volume(*volume, zs, params, [print]() { print->throw_if_canceled(); });
+    std::optional<Nonplanar::SliceContext> nonplanar;
+    if (print->nonplanar()) {
+        const Point shift = this->instances().front().shift_without_plate_offset();
+        nonplanar.emplace(Nonplanar::SliceContext{*print->m_nonplanar_job,
+                                                Vec2d(unscale<double>(shift.x()), unscale<double>(shift.y()))});
+    }
+    return slice_volume(*volume, zs, params, [print]() { print->throw_if_canceled(); }, nonplanar ? &*nonplanar : nullptr);
 }
 
 } // namespace Slic3r

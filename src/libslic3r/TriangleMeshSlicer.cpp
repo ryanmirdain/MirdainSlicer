@@ -2155,6 +2155,14 @@ std::vector<ExPolygons> slice_mesh_ex(
         layers_p = slice_mesh(mesh, zs, slicing_params, throw_on_cancel);
     }
     
+    return slice_mesh_ex(std::move(layers_p), params, throw_on_cancel);
+}
+
+std::vector<ExPolygons> slice_mesh_ex(
+    std::vector<Polygons>             layers_p,
+    const MeshSlicingParamsEx        &params,
+    std::function<void()>             throw_on_cancel)
+{
 //    BOOST_LOG_TRIVIAL(debug) << "slice_mesh make_expolygons in parallel - start";
     std::vector<ExPolygons> layers(layers_p.size(), ExPolygons{});
     tbb::parallel_for(

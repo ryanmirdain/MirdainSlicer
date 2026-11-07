@@ -1,0 +1,130 @@
+name: Web slicer native runtime
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-slicer-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Ubuntu 24.04 ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      CMAKE_CCACHE: ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      APPIMAGE_EXTRACT_AND_RUN: 1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          lfs: false
+          persist-credentials: false
+
+      - name: Prepare hosted runner capacity
+        # These SDKs are unused by the native Linux build. Reserve swap for
+        # hosted private-repository runners that have less physical RAM.
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+          sudo fallocate -l 8G /swapfile-web-slicer
+          sudo chmod 600 /swapfile-web-slicer
+          sudo mkswap /swapfile-web-slicer
+          sudo swapon /swapfile-web-slicer
+          df -h /
+          free -h
+
+      - name: Install system dependencies
+        run: |
+          sudo ./build_linux.sh -ur
+          sudo apt-get install -y ccache
+          ccache --max-size 2G
+
+      - uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: '4.3.0'
+
+      - name: Restore native dependencies
+        id: deps
+        uses: actions/cache@v6
+        with:
+          path: deps/build/OrcaSlicer_dep
+          key: web-slicer-ubuntu2404-clang-cmake430-${{ matrix.arch }}-${{ hashFiles('deps/**', 'build_linux.sh', 'scripts/linux.d/**') }}
+
+      - name: Restore compiler cache
+        uses: actions/cache@v6
+        with:
+          path: .ccache
+          key: web-slicer-ccache-${{ matrix.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: web-slicer-ccache-${{ matrix.arch }}-
+
+      - name: Build dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: ./build_linux.sh -drlL -j 2
+
+      - name: Build release AppImage
+        # No -t: this workflow only compiles and packages the runtime.
+        run: ./build_linux.sh -sirlL -j 2 -- -DBUILD_TESTS=OFF
+
+      - name: Package pinned artifact
+        env:
+          RUNTIME_ARCH: ${{ matrix.arch }}
+          RUNTIME_REPOSITORY: ${{ github.repository }}
+          RUNTIME_TAG: web-slicer-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python3 scripts/package_web_slicer_runtime.py package \
+            --arch "$RUNTIME_ARCH" --repository "$RUNTIME_REPOSITORY" \
+            --tag "$RUNTIME_TAG" --output runtime-dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-runtime-${{ matrix.arch }}
+          path: runtime-dist/*
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-runtime-*
+          path: runtime-dist
+          merge-multiple: true
+
+      - name: Assemble release manifest
+        run: python3 scripts/package_web_slicer_runtime.py manifest runtime-dist
+
+      - name: Publish native runtime release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUNTIME_REVISION: ${{ github.sha }}
+          RUNTIME_TAG: web-slicer-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          gh release create "$RUNTIME_TAG" runtime-dist/*.AppImage runtime-dist/orca-native-release.json \
+            --target "$RUNTIME_REVISION" --title "Web slicer runtime $RUNTIME_REVISION" \
+            --notes "Native Ubuntu 24.04 amd64 and arm64 AppImages built from $RUNTIME_REVISION. Import orca-native-release.json into the web slicer to pin this release." \
+            --prerelease --latest=false
+          echo "Manifest: https://github.com/$GH_REPO/releases/download/$RUNTIME_TAG/orca-native-release.json" >> "$GITHUB_STEP_SUMMARY"

@@ -3273,22 +3273,6 @@ BoundingBox PrintObject::get_first_layer_bbox(float& a, float& layer_height, std
     BoundingBox bbox;
     a = 0;
     name = this->model_object()->name;
-    if (this->print()->nonplanar() && this->print()->m_nonplanar_job) {
-        const auto &job = *this->print()->m_nonplanar_job;
-        layer_height = 0.;
-        for (const auto &path : job.layers.front().paths) if (path.object_id == this->id().id) {
-            bbox.merge(Point(scale_(path.start.x),scale_(path.start.y)));
-            a += path.projected_area/(SCALING_FACTOR*SCALING_FACTOR);
-            for (const auto &segment : path.segments) {
-                bbox.merge(Point(scale_(segment.end.x),scale_(segment.end.y)));
-                // The legacy metadata has one scalar height; use the maximum
-                // modeled gap. Native preview retains every segment's dimensions.
-                layer_height = std::max(layer_height,float(segment.vertical_height));
-            }
-        }
-        bbox.offset(scale_(job.settings.width*.5));
-        return bbox;
-    }
     if (layer_count() > 0) {
         auto layer = get_layer(0);
         layer_height = layer->height;
@@ -3356,36 +3340,8 @@ std::map<ObjectID, unsigned int> getObjectExtruderMap(const Print& print) {
 void Print::process(long long *time_cost_with_cache, bool use_cache)
 {
     if (nonplanar()) {
-        if (time_cost_with_cache) *time_cost_with_cache = 0;
-        if (use_cache) throw std::invalid_argument(_u8L("Nonplanar slicing does not support planar slice caches"));
-        m_nonplanar_job.reset();
-        this->set_status(5, L("Slicing supplied nonplanar layers"));
-        m_wipe_tower_data.clear();
-        m_skirt.clear();
-        m_skirt_brim_groups.clear();
-        m_has_shared_per_object_skirt = false;
-        m_skirt_convex_hull.clear();
-        m_first_layer_convex_hull.points.clear();
-        m_brimMap.clear();
-        m_brimMapByInstance.clear();
-        m_brimFilamentMap.clear();
-        m_objectBrimAreasByInstance.clear();
-        for (PrintObject *object : m_objects) object->clear_shared_object();
-        for (PrintObject *object : m_objects) {
-            object->clear_support_layers();
-            object->clear_layers();
-            object->m_skirt.clear();
-        }
-        m_nonplanar_job = Nonplanar::prepare(*this,m_nonplanar_source);
-        // These milestones now refer to the native nonplanar job. No scalar-Z
-        // layers are synthesized to send through the standard slicing pipeline.
-        for (PrintObject *object : m_objects)
-            for (int step = 0; step < posCount; ++step)
-                if (object->set_started(PrintObjectStep(step))) object->set_done(PrintObjectStep(step));
-        for (auto step : {psWipeTower,psSkirtBrim})
-            if (this->set_started(step)) this->set_done(step);
-        this->set_status(80, L("Nonplanar paths generated"));
-        return;
+        if (use_cache) throw std::invalid_argument(_u8L("Supplied layers do not support planar slice caches"));
+        m_nonplanar_job = Nonplanar::prepare(*this, m_nonplanar_source);
     }
     long long start_time = 0, end_time = 0;
     if (time_cost_with_cache)
@@ -3483,7 +3439,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     std::set<PrintObject*> re_slicing_objects;
     // Belt global modes couple each object's bed position into its layer Z values,
     // so sharing layers between "identical" objects is wrong.
-    bool belt_no_share = m_config.belt_printer.value;
+    bool belt_no_share = m_config.belt_printer.value || nonplanar();
     if (!use_cache) {
         for (int index = 0; index < object_count; index++)
         {
@@ -4103,12 +4059,6 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 // It is up to the caller to show an error message.
 std::string Print::export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
-    if (nonplanar()) {
-        if (!m_nonplanar_job) throw std::logic_error(_u8L("Generate nonplanar paths before exporting G-code"));
-        const std::string path = Nonplanar::export_gcode(*this,*m_nonplanar_job,this->output_filepath(path_template),result);
-        if (this->set_started(psGCodeExport)) this->set_done(psGCodeExport);
-        return path;
-    }
     // output everything to a G-code file
     // The following call may die if the filename_format template substitution fails.
     std::string path = this->output_filepath(path_template);
@@ -4142,6 +4092,8 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
     const Vec2d imex_off = this->get_imex_slice_offset();
     gcode->set_gcode_offset_with_imex_shift(origin(0), origin(1), imex_off.x(), imex_off.y());
     gcode->do_export(this, path.c_str(), result, thumbnail_cb);
+    if (nonplanar())
+        Nonplanar::unwarp_gcode(*this, *m_nonplanar_job, path, result);
     gcode->export_layer_filaments(result);
     //BBS
     if (result != nullptr) {
