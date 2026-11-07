@@ -1,5 +1,9 @@
 # Native runtime releases for the web slicer
 
+This fork keeps only the manually dispatched native-runtime workflow. Inherited
+upstream build matrices, tests, scheduled jobs, and repository-maintenance
+workflows are removed so pushes and schedules do not consume Actions minutes.
+
 The `Web slicer native runtime` workflow is manually dispatched from the fork's
 Actions page. It builds Release AppImages on native Ubuntu 24.04 amd64 and arm64
 runners using the same source commit. It installs the build script's system
