@@ -148,7 +148,7 @@ public:
             const auto [low,high] = h.bounds();
             auto first = std::lower_bound(cells[cell].begin(),cells[cell].end(),low,
                 [](const Piece &p, double z) { return p.max_z < z; });
-            if (first == cells[cell].end() || std::none_of(first,cells[cell].end(),[&](const Piece &p) { return p.min_z <= high; })) continue;
+            if (first == cells[cell].end() || std::none_of(first,cells[cell].end(),[high_z = high](const Piece &p) { return p.min_z <= high_z; })) continue;
             const size_t sx = steps_x[cell%nx], sy = steps_y[cell/nx];
             std::vector<XYZ> vertices((sx+1)*(sy+1));
             for (size_t v = 0; v <= sy; ++v) for (size_t u = 0; u <= sx; ++u) {

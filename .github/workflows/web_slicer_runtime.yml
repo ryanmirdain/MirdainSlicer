@@ -12,16 +12,8 @@ concurrency:
 
 jobs:
   build:
-    name: Ubuntu 24.04 ${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+    name: Ubuntu 24.04 amd64
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: 2
@@ -59,29 +51,45 @@ jobs:
 
       - name: Restore native dependencies
         id: deps
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: deps/build/OrcaSlicer_dep
-          key: web-slicer-ubuntu2404-clang-cmake430-${{ matrix.arch }}-${{ hashFiles('deps/**', 'build_linux.sh', 'scripts/linux.d/**') }}
+          key: web-slicer-ubuntu2404-clang-cmake430-amd64-${{ hashFiles('deps/**', 'build_linux.sh', 'scripts/linux.d/**') }}
 
       - name: Restore compiler cache
-        uses: actions/cache@v6
+        id: compiler_cache
+        uses: actions/cache/restore@v6
         with:
           path: .ccache
-          key: web-slicer-ccache-${{ matrix.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: web-slicer-ccache-${{ matrix.arch }}-
+          key: web-slicer-ccache-amd64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: web-slicer-ccache-amd64-
 
       - name: Build dependencies
         if: steps.deps.outputs.cache-hit != 'true'
         run: ./build_linux.sh -drlL -j 2
 
+      - name: Save completed native dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: deps/build/OrcaSlicer_dep
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
       - name: Build release AppImage
+        id: compile
         # No -t: this workflow only compiles and packages the runtime.
         run: ./build_linux.sh -sirlL -j 2 -- -DBUILD_TESTS=OFF
 
+      - name: Save compiler progress
+        if: ${{ !cancelled() && steps.compiler_cache.outcome == 'success' && (steps.compile.outcome == 'success' || steps.compile.outcome == 'failure') }}
+        uses: actions/cache/save@v6
+        with:
+          path: .ccache
+          key: ${{ steps.compiler_cache.outputs.cache-primary-key }}
+
       - name: Package pinned artifact
         env:
-          RUNTIME_ARCH: ${{ matrix.arch }}
+          RUNTIME_ARCH: amd64
           RUNTIME_REPOSITORY: ${{ github.repository }}
           RUNTIME_TAG: web-slicer-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
@@ -91,7 +99,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: native-runtime-${{ matrix.arch }}
+          name: native-runtime-amd64
           path: runtime-dist/*
           if-no-files-found: error
           compression-level: 0
@@ -109,9 +117,8 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          pattern: native-runtime-*
+          name: native-runtime-amd64
           path: runtime-dist
-          merge-multiple: true
 
       - name: Assemble release manifest
         run: python3 scripts/package_web_slicer_runtime.py manifest runtime-dist
@@ -125,6 +132,6 @@ jobs:
         run: |
           gh release create "$RUNTIME_TAG" runtime-dist/*.AppImage runtime-dist/orca-native-release.json \
             --target "$RUNTIME_REVISION" --title "Web slicer runtime $RUNTIME_REVISION" \
-            --notes "Native Ubuntu 24.04 amd64 and arm64 AppImages built from $RUNTIME_REVISION. Import orca-native-release.json into the web slicer to pin this release." \
+            --notes "Native Ubuntu 24.04 amd64 AppImage built from $RUNTIME_REVISION. Import orca-native-release.json into the web slicer to pin this release." \
             --prerelease --latest=false
           echo "Manifest: https://github.com/$GH_REPO/releases/download/$RUNTIME_TAG/orca-native-release.json" >> "$GITHUB_STEP_SUMMARY"

@@ -43,10 +43,12 @@ def main():
         (args.output / f'{args.arch}.json').write_text(json.dumps(release, indent=2) + '\n')
         return
 
-    releases = [json.loads((args.directory / f'{arch}.json').read_text()) for arch in ('amd64', 'arm64')]
+    architectures = [arch for arch in ('amd64', 'arm64') if (args.directory / f'{arch}.json').is_file()]
+    assert architectures, 'No architecture manifests found.'
+    releases = [json.loads((args.directory / f'{arch}.json').read_text()) for arch in architectures]
     release = {key: value for key, value in releases[0].items() if key != 'assets'}
     assets = {}
-    for arch, item in zip(('amd64', 'arm64'), releases):
+    for arch, item in zip(architectures, releases):
         assert {key: value for key, value in item.items() if key != 'assets'} == release
         asset = item['assets'][arch]
         assert checksum(args.directory / asset['file']) == asset['sha256']
