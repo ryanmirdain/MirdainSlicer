@@ -97,6 +97,7 @@ std::vector<ExPolygons> slice_volume(const indexed_triangle_set &mesh, const std
             Vec3d p = params.trafo * mesh.vertices[face[corner]].cast<double>();
             p.head<2>() += context.xy_offset;
             triangle.vertices[corner] = {p.x(), p.y(), p.z()};
+            triangle.vertex_ids[corner] = size_t(face[corner]);
         }
         original.triangles.push_back(triangle);
     }

@@ -4,14 +4,20 @@
 #include <clipper2/clipper.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <string>
+#include <tuple>
 #include <utility>
+#include <vector>
 
 namespace Slic3r::Nonplanar {
 namespace {
@@ -48,6 +54,8 @@ std::vector<XYZ> clip_axis(const std::vector<XYZ> &polygon, int axis, double val
 class Intersection {
     struct Piece {
         std::vector<XYZ> polygon;
+        std::array<size_t,3> vertex_ids;
+        size_t face_id;
         XYZ normal;
         double min_z, max_z;
     };
@@ -64,7 +72,8 @@ public:
     Intersection(const LayerStack &s, const Object &object, const std::function<void()> &c)
         : stack(s), cancel(c), cells((s.x.size()-1)*(s.y.size()-1))
     {
-        for (const Triangle &t : object.triangles) {
+        for (size_t face = 0; face < object.triangles.size(); ++face) {
+            const Triangle &t = object.triangles[face];
             cancel();
             XYZ normal = cross(subtract(t.vertices[1],t.vertices[0]),subtract(t.vertices[2],t.vertices[0]));
             const double length = std::sqrt(dot(normal,normal));
@@ -92,7 +101,7 @@ public:
                 for (XYZ p : t.vertices) { lo = std::min(lo,p.z); hi = std::max(hi,p.z); }
                 // The surface facets already lie within this cell. Intersect
                 // the original triangle, avoiding extra clipping seams.
-                cells[j*(stack.x.size()-1)+i].push_back({std::vector<XYZ>(t.vertices.begin(),t.vertices.end()),normal,lo,hi});
+                cells[j*(stack.x.size()-1)+i].push_back({std::vector<XYZ>(t.vertices.begin(),t.vertices.end()),t.vertex_ids,face,normal,lo,hi});
             }
         }
         for (auto &cell : cells)
@@ -101,29 +110,30 @@ public:
 
     Paths64 cross_section(const Surface &surface)
     {
-        // Join curve segments just as a planar mesh slicer joins triangle cuts.
+        // Coordinates reconcile roundoff only within the same indexed mesh
+        // feature. Coincident boundaries of different shells remain distinct.
         struct Node { XY p; std::vector<size_t> edges; };
         struct Edge { size_t a,b; bool used = false; };
         std::vector<Node> nodes;
         std::vector<Edge> edges;
-        std::map<std::pair<int64_t,int64_t>,std::vector<size_t>> buckets;
+        std::map<std::tuple<std::array<size_t,3>,int64_t,int64_t>,std::vector<size_t>> buckets;
         std::set<std::pair<size_t,size_t>> unique;
         constexpr double join = 2e-6;
-        auto node = [&](XY p) {
+        auto node = [&](XYZ position, const Piece &piece) {
+            const XY p = xy(position);
+            const auto feature = mesh_feature(piece,position);
             const int64_t x = std::llround(p.x/join), y = std::llround(p.y/join);
             for (int dx = -1; dx <= 1; ++dx) for (int dy = -1; dy <= 1; ++dy) {
-                auto it = buckets.find({x+dx,y+dy});
+                auto it = buckets.find({feature,x+dx,y+dy});
                 if (it != buckets.end()) for (size_t n : it->second)
                     if (std::hypot(nodes[n].p.x-p.x,nodes[n].p.y-p.y) <= join) return n;
             }
             const size_t n = nodes.size();
-            nodes.push_back({p,{}}); buckets[{x,y}].push_back(n); return n;
+            nodes.push_back({p,{}}); buckets[{feature,x,y}].push_back(n); return n;
         };
-        auto line = [&](XY a, XY b) {
-            const size_t na = node(a), nb = node(b);
-            if (na == nb || !unique.insert(std::minmax(na,nb)).second) return;
-            nodes[na].edges.push_back(edges.size()); nodes[nb].edges.push_back(edges.size());
-            edges.push_back({na,nb});
+        auto line = [&](XYZ a, XYZ b, const Piece &piece) {
+            const size_t na = node(a,piece), nb = node(b,piece);
+            if (na != nb) unique.insert({na,nb});
         };
         const size_t nx = stack.x.size()-1;
         std::vector<Patch> patches(cells.size());
@@ -169,6 +179,14 @@ public:
                 facet({vertices[n],vertices[n+sx+2],vertices[n+sx+1]});
             }
         }
+        // Shared surface facets may report a segment twice. A tangential mesh
+        // edge contributes opposite directions, which cancel. Both operations
+        // are scoped by mesh topology through the endpoint identities above.
+        for (const auto &[a,b] : unique) {
+            if (unique.count({b,a})) continue;
+            nodes[a].edges.push_back(edges.size());
+            edges.push_back({a,b});
+        }
         Paths64 loops;
         for (size_t e = 0; e < edges.size(); ++e) {
             if (edges[e].used) continue;
@@ -178,7 +196,7 @@ public:
             do {
                 path.push_back(point(nodes[current].p));
                 Edge &edge = edges[next_edge]; edge.used = true;
-                current = edge.a == current ? edge.b : edge.a;
+                current = edge.b;
                 if (current == start) break;
                 auto next = std::find_if(nodes[current].edges.begin(),nodes[current].edges.end(),
                     [&](size_t n) { return !edges[n].used; });
@@ -192,6 +210,27 @@ public:
     }
 
 private:
+    static std::array<size_t,3> mesh_feature(const Piece &piece, XYZ p)
+    {
+        constexpr double epsilon = 1e-9;
+        for (size_t n = 0; n < 3; ++n)
+            if (distance(p,piece.polygon[n]) <= epsilon)
+                return {0,piece.vertex_ids[n],0};
+        for (size_t n = 0; n < 3; ++n) {
+            const size_t next = (n+1)%3;
+            const XYZ edge = subtract(piece.polygon[next],piece.polygon[n]);
+            const XYZ offset = subtract(p,piece.polygon[n]);
+            const double length_squared = dot(edge,edge);
+            const XYZ perpendicular = cross(edge,offset);
+            if (dot(perpendicular,perpendicular) <= epsilon*epsilon*length_squared &&
+                dot(offset,edge) >= 0. && dot(offset,edge) <= length_squared) {
+                const auto ids = std::minmax(piece.vertex_ids[n],piece.vertex_ids[next]);
+                return {1,ids.first,ids.second};
+            }
+        }
+        return {2,piece.face_id,0};
+    }
+
     template<class Emit> void trace(const Piece &piece, const std::array<XYZ,3> &triangle, Emit emit)
     {
         const XYZ origin = piece.polygon.front();
@@ -227,7 +266,7 @@ private:
             const XYZ surface_normal = cross(subtract(triangle[1], triangle[0]), subtract(triangle[2], triangle[0]));
             const XYZ direction = cross(surface_normal, piece.normal);
             if (dot(subtract(b, a), direction) < 0.) std::swap(a, b);
-            emit(xy(a), xy(b));
+            emit(a, b, piece);
         }
     }
 };

@@ -9,7 +9,10 @@
 #include <vector>
 
 namespace Slic3r::Nonplanar {
-struct Triangle { std::array<XYZ, 3> vertices; };
+struct Triangle {
+    std::array<XYZ, 3> vertices;
+    std::array<size_t, 3> vertex_ids;
+};
 struct Object { std::vector<Triangle> triangles; };
 struct Job {
     LayerStack stack;

@@ -47,6 +47,16 @@ Grid-cell clipping selects candidate source triangles only. Intersection uses
 the original triangle planes and boundaries; it does not intersect against the
 extra edges created by clipping a triangle into separate grid cells.
 
+Contour assembly retains the input mesh's indexed vertex identities. An
+intersection endpoint belongs to a mesh vertex, an indexed mesh edge, or a
+source face interior. Coordinate tolerances join endpoints only within that
+feature, including joins across the surface tessellation. Separate coincident
+mesh boundaries are not welded. Repeated directed segments from shared surface
+facets are emitted once; opposite segments at a tangential mesh edge cancel.
+Loops follow segment direction to retain the winding supplied by mesh normals.
+The ordinary polygon fill processing resolves the resulting closed contours;
+assembly does not modify or union the input mesh.
+
 Placed instances are sliced separately because their intersections depend on
 position within the supplied field. Planar slice caches cannot store this field.
 The existing model metadata preserves the stack and placement provenance; the
