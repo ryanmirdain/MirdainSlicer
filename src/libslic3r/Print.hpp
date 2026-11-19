@@ -55,7 +55,7 @@
 
 namespace Slic3r {
 
-namespace Nonplanar { struct Job; }
+namespace Nonplanar { struct Job; class LayerStack; }
 
 class SlicingErrors;
 
@@ -1086,7 +1086,7 @@ public:
     ApplyStatus         apply(const Model &model, DynamicPrintConfig config, bool extruder_applied = false) override;
 
     void                process(long long *time_cost_with_cache = nullptr, bool use_cache = false) override;
-    bool                nonplanar() const { return !m_nonplanar_source.empty(); }
+    bool                nonplanar() const { return bool(m_nonplanar_layers); }
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
     // If preview_data is not null, the preview_data is filled in for the G-code visualization (not used by the command line Slic3r).
     std::string         export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
@@ -1547,7 +1547,7 @@ private:
     Points                                  m_skirt_convex_hull;
 
     std::vector<std::vector<DynamicPrintConfig>> m_extruder_filament_info;
-    std::string m_nonplanar_source;
+    std::shared_ptr<const Nonplanar::LayerStack> m_nonplanar_layers;
     std::shared_ptr<Nonplanar::Job> m_nonplanar_job;
     // Payload handed to set_extruder_filament_info(), installed by Print::apply(). See the setter.
     std::vector<std::vector<DynamicPrintConfig>> m_pending_extruder_filament_info;

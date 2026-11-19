@@ -59,6 +59,8 @@ namespace cereal {
 
 namespace Slic3r {
 
+namespace Nonplanar { class LayerStack; }
+
 struct TexturedMesh;
 enum class ConversionType;
 
@@ -1685,6 +1687,7 @@ public:
     std::string origin;         // utf8 format
 
     std::map<std::string, std::string> metadata_items; // other meta data items
+    std::shared_ptr<const Nonplanar::LayerStack> nonplanar_layers; // validated, immutable metadata cache
 
     void load(ModelInfo &info) {
         this->cover_file    = info.cover_file;
@@ -1694,6 +1697,7 @@ public:
         this->model_name    = info.model_name;
         this->origin        = info.origin;
         this->metadata_items = info.metadata_items;
+        this->nonplanar_layers = info.nonplanar_layers;
     }
 };
 
@@ -1914,6 +1918,7 @@ private:
             for (const char *key : {"orca_nonplanar_layers_v1", "orca_nonplanar_schema_version", "orca_nonplanar_placement_v1"})
                 model_info->metadata_items.erase(key);
             model_info->metadata_items.insert(nonplanar.begin(),nonplanar.end());
+            model_info->nonplanar_layers.reset();
         }
     }
     template<class Archive> void save(Archive& ar) const {

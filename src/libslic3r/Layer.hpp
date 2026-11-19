@@ -169,6 +169,10 @@ public:
     // that the 1st lslice is not compensated by the Elephant foot compensation algorithm.
     ExPolygons 				 lslices;
     ExPolygons 				 lslices_extrudable;  // BBS: the extrudable part of lslices used for tree support
+    // Original-mesh contours at neighboring physical surfaces. Regional mask
+    // edges constrain extrusion, but do not create physical tops or bridges.
+    bool has_nonplanar_references = false;
+    ExPolygons nonplanar_below, nonplanar_above;
     std::vector<BoundingBox> lslices_bboxes;
     // Orca: for separated infills / per-model centering / octree infills. Aligned with lslices: for each
     // island, the 3D connected body (across all layers) it belongs to, indexing

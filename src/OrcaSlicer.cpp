@@ -1387,10 +1387,10 @@ int CLI::run(int argc, char **argv)
     bool   need_skip      = (skip_objects.size() > 0)?true:false;
     long long global_begin_time = 0, global_current_time;
     sliced_info_t sliced_info;
-    std::optional<Slic3r::Nonplanar::LayerStack> nonplanar_layers;
+    std::shared_ptr<const Slic3r::Nonplanar::LayerStack> nonplanar_layers;
     if (const auto *option = m_config.option<ConfigOptionString>("nonplanar_layers"); option && !option->value.empty()) {
         try {
-            nonplanar_layers = Slic3r::Nonplanar::LayerStack::read(option->value);
+            nonplanar_layers = std::make_shared<Slic3r::Nonplanar::LayerStack>(Slic3r::Nonplanar::LayerStack::read(option->value));
             const auto *arrange = m_config.option<ConfigOptionInt>("arrange");
             const auto *orient = m_config.option<ConfigOptionInt>("orient");
             if (!m_given_option_keys.count("arrange") || !m_given_option_keys.count("orient") ||
@@ -2065,7 +2065,7 @@ int CLI::run(int argc, char **argv)
     }
 
     if (nonplanar_layers) {
-        for (auto &model : m_models) Slic3r::Nonplanar::attach(model,*nonplanar_layers);
+        for (auto &model : m_models) Slic3r::Nonplanar::attach(model,nonplanar_layers);
     }
     for (const auto &model : m_models) {
         if (model.model_info && model.model_info->metadata_items.count(Slic3r::Nonplanar::metadata_key)) {
@@ -4107,7 +4107,7 @@ int CLI::run(int argc, char **argv)
     // CLI input merging constructs a new Model and does not copy ModelInfo.
     // Attach to the final combined geometry so all objects share one layer job.
     if (nonplanar_layers)
-        for (auto &model : m_models) Slic3r::Nonplanar::attach(model,*nonplanar_layers);
+        for (auto &model : m_models) Slic3r::Nonplanar::attach(model,nonplanar_layers);
 
 
     //update the object config due to extruder count change

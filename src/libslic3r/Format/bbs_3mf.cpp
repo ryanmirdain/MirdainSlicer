@@ -4263,7 +4263,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             ;
         }
         if (!m_curr_metadata_name.empty()) {
-            BOOST_LOG_TRIVIAL(info) << "load_3mf found metadata key = " << m_curr_metadata_name << ", value = " << xml_unescape(m_curr_characters);
+            BOOST_LOG_TRIVIAL(info) << "load_3mf found metadata key = " << m_curr_metadata_name << ", xml_bytes = " << m_curr_characters.size();
             model_info.metadata_items[m_curr_metadata_name] = xml_unescape(m_curr_characters);
         }
 
@@ -7305,14 +7305,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             if (!model.md_name.empty()) {
                 for (unsigned int i = 0; i < model.md_name.size(); i++)
                 {
-                    BOOST_LOG_TRIVIAL(info) << boost::format("saved metadata_name %1%, metadata_value %2%") %model.md_name[i] %model.md_value[i];
+                    BOOST_LOG_TRIVIAL(info) << "saved metadata_name " << model.md_name[i] << ", bytes = " << model.md_value[i].size();
                     metadata_item_map[model.md_name[i]] = xml_escape(model.md_value[i]);
                 }
             }
 
             // store metadata info
-            for (auto item : metadata_item_map) {
-                BOOST_LOG_TRIVIAL(info) << "bbs_3mf: save key= " << item.first << ", value = " << item.second;
+            for (const auto &item : metadata_item_map) {
+                BOOST_LOG_TRIVIAL(info) << "bbs_3mf: save key= " << item.first << ", bytes = " << item.second.size();
                 stream << " <" << METADATA_TAG << " name=\"" << item.first << "\">"
                        << xml_escape(item.second) << "</" << METADATA_TAG << ">\n";
                 if (item.first == BBL_APPLICATION_TAG && !m_minimal_published) {

@@ -2008,7 +2008,9 @@ void PrintObject::detect_surfaces_type()
                     // find top surfaces (difference between current surfaces
                     // of current layer and upper one)
                     Surfaces top;
-                    if (upper_layer) {
+                    if (layer->has_nonplanar_references) {
+                        surfaces_append(top, opening_ex(diff_ex(layerm_slices_surfaces, layer->nonplanar_above, ApplySafetyOffset::Yes), offset), stTop);
+                    } else if (upper_layer) {
                         ExPolygons upper_slices = interface_shells ?
                             diff_ex(layerm_slices_surfaces, upper_layer->m_regions[region_id]->slices.surfaces, ApplySafetyOffset::Yes) :
                             diff_ex_by_piece(layerm_slices_surfaces, to_polygons(upper_layer->lslices), ApplySafetyOffset::Yes);
@@ -2023,7 +2025,9 @@ void PrintObject::detect_surfaces_type()
 
                     // Find bottom surfaces (difference between current surfaces of current layer and lower one).
                     Surfaces bottom;
-                    if (lower_layer) {
+                    if (layer->has_nonplanar_references && lower_layer) {
+                        surfaces_append(bottom, opening_ex(diff_ex(layerm_slices_surfaces, layer->nonplanar_below, ApplySafetyOffset::Yes), offset), surface_type_bottom_other);
+                    } else if (lower_layer) {
 #if 0
                         //FIXME Why is this branch failing t\multi.t ?
                         Polygons lower_slices = interface_shells ?

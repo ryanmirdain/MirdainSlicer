@@ -148,11 +148,16 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         fill_no_overlap
     );
     
-    if (this->layer()->upper_layer != NULL)
+    SurfaceCollection upper_reference;
+    if (this->layer()->has_nonplanar_references) {
+        g.upper_slices = &this->layer()->nonplanar_above;
+        upper_reference.set(this->layer()->nonplanar_above, stInternal);
+        g.upper_slices_same_region = &upper_reference;
+    } else if (this->layer()->upper_layer != NULL)
         g.upper_slices = &this->layer()->upper_layer->lslices;
 
     int region_id = this->region().print_object_region_id();
-    if (this->layer()->upper_layer != NULL)
+    if (this->layer()->upper_layer != NULL && !this->layer()->has_nonplanar_references)
         g.upper_slices_same_region = &this->layer()->upper_layer->get_region(region_id)->slices;
 
     g.layer_id              = (int)this->layer()->id();
@@ -163,7 +168,8 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     // Cumulative sum of polygons over all the regions, less what the lower layer could not print.
     ExPolygons lower_slices;
     if (this->layer()->lower_layer != nullptr) {
-        lower_slices   = g.printable_slices(this->layer()->lower_layer->lslices);
+        lower_slices   = g.printable_slices(this->layer()->has_nonplanar_references ?
+            this->layer()->nonplanar_below : this->layer()->lower_layer->lslices);
         g.lower_slices = &lower_slices;
     }
 
@@ -685,6 +691,10 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
     // Areas, where an infill of various types (top, bottom, bottom bride, sparse, void) could be placed.
     Polygons                    fill_boundaries = to_polygons(this->fill_expolygons);
     Polygons  					lower_layer_covered_tmp;
+    if (this->layer()->has_nonplanar_references) {
+        lower_layer_covered_tmp = to_polygons(this->layer()->nonplanar_below);
+        lower_layer_covered = &lower_layer_covered_tmp;
+    }
 
     // Collect top surfaces and internal surfaces.
     // Collect fill_boundaries: If we're slicing with no infill, we can't extend external surfaces over non-existent infill.
@@ -725,7 +735,7 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
         	// Remove voids from fill_boundaries, that are not supported by the layer below.
             if (lower_layer_covered == nullptr) {
             	lower_layer_covered = &lower_layer_covered_tmp;
-            	lower_layer_covered_tmp = to_polygons(lower_layer->lslices);
+                lower_layer_covered_tmp = to_polygons(this->layer()->has_nonplanar_references ? this->layer()->nonplanar_below : lower_layer->lslices);
             }
             if (! lower_layer_covered->empty())
             	voids = diff(voids, *lower_layer_covered);
@@ -861,7 +871,8 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
                 if (custom_angle_deg > 0.0 && !relative_angle) {
                     bridges[idx_last].bridge_angle = custom_angle_rad + align_offset_rad;
                 } else {
-                    auto [bridging_dir, unsupported_dist] = detect_bridging_direction(to_polygons(initial), to_polygons(lower_layer->lslices));
+                    auto [bridging_dir, unsupported_dist] = detect_bridging_direction(to_polygons(initial), to_polygons(
+                        this->layer()->has_nonplanar_references ? this->layer()->nonplanar_below : lower_layer->lslices));
                     bridges[idx_last].bridge_angle = PI + std::atan2(bridging_dir.y(), bridging_dir.x());
                     if (custom_angle_deg > 0.0 && relative_angle)
                         bridges[idx_last].bridge_angle += custom_angle_rad;

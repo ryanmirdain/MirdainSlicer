@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:orcaslicer:orca_nonplanar_layers:1",
-  "title": "Externally supplied OrcaSlicer layer surfaces, version 1",
+  "$id": "urn:orcaslicer:orca_nonplanar_layers:2",
+  "title": "Externally supplied OrcaSlicer layer surfaces, versions 1 and 2",
   "type": "object",
   "required": ["format", "version", "units", "coordinate_system", "plate_index", "grid", "bed", "limits", "layers"],
   "properties": {
     "format": {"const": "orca_nonplanar_layers"},
-    "version": {"const": 1},
+    "version": {"enum": [1, 2]},
     "units": {"const": "mm"},
     "coordinate_system": {"const": "plate_world_xyz"},
     "plate_index": {"type": "integer", "minimum": 0},
@@ -15,7 +15,7 @@
       "type": "object", "required": ["x", "y"],
       "properties": {"x": {"$ref": "#/$defs/axis"}, "y": {"$ref": "#/$defs/axis"}}
     },
-    "bed": {"$ref": "#/$defs/plane"},
+    "bed": {"$ref": "#/$defs/surface"},
     "limits": {
       "type": "object",
       "required": ["geometry_tolerance_mm", "path_chord_tolerance_mm", "max_segment_length_mm", "min_vertical_gap_mm", "max_vertical_gap_mm", "max_slope_degrees"],
@@ -34,12 +34,32 @@
         "type": "object", "required": ["id", "surface"],
         "properties": {
           "id": {"type": "integer", "minimum": 0},
-          "surface": {"oneOf": [{"$ref": "#/$defs/plane"}, {"$ref": "#/$defs/height_grid"}]}
+          "surface": {"$ref": "#/$defs/surface"},
+          "reference_surface": {"oneOf": [{"$ref": "#/$defs/surface"}, {"$ref": "#/$defs/offset_reference"}], "description": "Lower surface, or a vertical offset of this layer's own surface. All layers must supply one when used."},
+          "clip_mask": {
+            "type": "array", "description": "Active plate-world XY regions. Omitted means full intersection; an empty array disables this layer.",
+            "items": {"type": "object", "required": ["outer"], "properties": {
+              "outer": {"$ref": "#/$defs/ring"},
+              "holes": {"type": "array", "items": {"$ref": "#/$defs/ring"}}
+            }}
+          }
         }
       }
     }
   },
+  "allOf": [{
+    "if": {"properties": {"version": {"const": 1}}},
+    "then": {"properties": {"layers": {"items": {"not": {"anyOf": [
+      {"required": ["clip_mask"]}, {"required": ["reference_surface"]}
+    ]}}}}}
+  }],
   "$defs": {
+    "offset_reference": {
+      "type": "object", "required": ["type", "z_offset"],
+      "properties": {"type": {"const": "offset"}, "z_offset": {"type": "number", "exclusiveMaximum": 0}}
+    },
+    "surface": {"oneOf": [{"$ref": "#/$defs/plane"}, {"$ref": "#/$defs/height_grid"}]},
+    "ring": {"type": "array", "minItems": 3, "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}}},
     "positive": {"type": "number", "exclusiveMinimum": 0},
     "axis": {"type": "array", "minItems": 2, "items": {"type": "number"}},
     "plane": {
@@ -49,7 +69,10 @@
     "height_grid": {
       "type": "object", "required": ["type", "z"],
       "properties": {
-        "type": {"const": "height_grid"},
+        "type": {"enum": ["height_grid", "height_hermite_grid"]},
+        "interpolation": {"enum": ["linear"]},
+        "gx": {"$ref": "#/$defs/height_grid/properties/z"},
+        "gy": {"$ref": "#/$defs/height_grid/properties/z"},
         "z": {"type": "array", "minItems": 2, "items": {"type": "array", "minItems": 2, "items": {"type": "number"}}}
       }
     }

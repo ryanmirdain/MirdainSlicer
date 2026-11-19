@@ -21208,8 +21208,8 @@ void Plater::import_nonplanar_layers()
     wxFileDialog dialog(this, _L("Import nonplanar layers"), "", "", "JSON (*.json)|*.json", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dialog.ShowModal() != wxID_OK) return;
     try {
-        const auto stack = Slic3r::Nonplanar::LayerStack::read(into_u8(dialog.GetPath()));
-        if (stack.plate_index != get_partplate_list().get_curr_plate_index())
+        const auto stack = std::make_shared<Slic3r::Nonplanar::LayerStack>(Slic3r::Nonplanar::LayerStack::read(into_u8(dialog.GetPath())));
+        if (stack->plate_index != get_partplate_list().get_curr_plate_index())
             throw std::invalid_argument(_u8L("Nonplanar plate_index must match the selected plate (zero-based)"));
         background_process().stop();
         take_snapshot(_u8L("Import nonplanar layers"));

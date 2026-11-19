@@ -25,6 +25,67 @@ Stack validation requires strict ordering between supplied layer surfaces at gri
 nodes and corresponding Hermite patch controls. The first surface may cross the
 bed plane; extensions outside printable material need not remain above the bed.
 
+## Regional XY masks
+
+Each layer may carry `clip_mask`, an array of `{outer, holes}` polygons in
+plate-world XY. Rings contain `[x,y]` points and are closed implicitly. Omission
+keeps the complete mesh intersection; an empty array produces an empty layer.
+Masks can also leave a layer with no printable area. Nonplanar layers carry
+nominal index-based `print_z` values, so G-code export does not raise the
+"empty layers" warning for them: a run of empty nonplanar layers says nothing
+about a physical gap. For the same reason the G-code processor skips its
+printable-height checks on nonplanar jobs; a deep layer stack on a short part
+would otherwise exceed `printable_height`. Object placement against the build
+volume still applies.
+The fork normalizes exterior/hole winding, converts masks into the same centered
+frame as the slice contours, and intersects closed `ExPolygons` after ordinary
+slice cleanup and before region assignment, perimeter generation, or infill.
+The input mesh and height grid are unchanged.
+
+Regional schedules may supply `reference_surface` on every layer. Each nominal
+layer interval then interpolates from that explicit reference to its own top
+surface. This keeps output mapping and slice sampling associated with the right
+surface when independently masked stacks share one job. Validation requires each
+top to remain above its own reference at corresponding patch controls, instead
+of requiring unrelated neighboring regional surfaces to be ordered over all XY.
+The exporter owns the regional printing order and material partition. Without
+explicit references, the original globally ordered schedule is unchanged.
+
+A reference may instead use `{"type":"offset","z_offset":-0.2}` to share its
+own layer's height grid and derivatives with a negative vertical offset. The
+native representation shares the patches too. Full explicit reference surfaces
+remain supported.
+
+For masked jobs, the original mesh is also intersected at unmasked copies of
+each top surface shifted down/up by the configured layer height. These reference
+contours are separate from printable slices. Surface classification uses them
+to identify physical tops and bottoms; perimeter overhang and bridge direction
+checks use the lower reference. A mask edge therefore does not itself create an
+external top, bottom, or unsupported wall. The first printing layer retains the
+ordinary bottom-surface treatment. Perimeters and infill use only active slices.
+
+Each placed volume is transformed and indexed once per slicing operation.
+Independent layers run through Orca's TBB pool. A layer task builds one conforming
+surface tessellation and reuses it for vertical copies, including offset-based
+sampling surfaces. Tessellations are released inside the task; only completed
+contours are cached for later reference passes and repeated Z-range requests.
+An info-level `Nonplanar timings` JSON log records mesh transform, indexing,
+parallel contour wall time, polygon assembly, and mask clipping separately.
+
+Validated layer stacks are immutable and shared by the importing model and
+print jobs. Metadata lookup reuses a stack only when its original JSON text
+matches the model metadata; edited or restored input is validated again. Projects
+retain the validated input text verbatim. Import logs `Nonplanar input timings`
+once per parse, including validation and patch construction. Project export logs
+metadata keys and byte counts without dumping the layer grids into the log.
+
+An individual surface can set `interpolation: "linear"` to retain triangular
+height-grid evaluation inside an otherwise cubic job, including its explicit
+reference. Masks and regional references require format version 2, so older runtimes
+reject them instead of ignoring clipping. Ordinary version-1 inputs remain
+supported. Embedded projects retain the matching version marker. The schema
+includes both formats, Hermite grids, and regional fields.
+
 The optional top-level JSON boolean `interpolate` defaults to `true`, retaining
 cubic XY surface reconstruction. With `false`, each grid cell is two planar
 triangles sharing the lower-left to upper-right diagonal. Supplied heights are
@@ -46,6 +107,12 @@ in the ordinary pipeline; geometry is not forced into region zero.
 Grid-cell clipping selects candidate source triangles only. Intersection uses
 the original triangle planes and boundaries; it does not intersect against the
 extra edges created by clipping a triangle into separate grid cells.
+Candidates in a cell are sorted by maximum Z. A compact copy of their minimum Z,
+with per-block minima, lets a surface facet skip runs of triangles that start
+above it. Candidates are still visited in maximum-Z order, so contour node
+numbering, and therefore the output, does not depend on the index. Surface
+tessellation error is a quarter of the stack's `geometry_tolerance_mm`; it
+dominates contour cost, which scales roughly inversely with the tolerance.
 
 Contour assembly retains the input mesh's indexed vertex identities. An
 intersection endpoint belongs to a mesh vertex, an indexed mesh edge, or a
@@ -71,9 +138,8 @@ unchanged. A Z-only transition enters mapped coordinates at fixed XY.
 
 The inverse accepts G0/G1 and XY-plane G2/G3. Moves are subdivided with the
 historical maximum-segment-length rule; arcs become linear segments. Total E
-and feed rates are retained. There is no local-gap extrusion compensation,
-feed-rate rewriting, custom clearance-hop planner or forced lift type. Mapped
-moves use absolute XYZ and relative E; original modes and the source extrusion
+and feed rates are retained. There is no local-gap extrusion compensation or
+feed-rate rewriting. Mapped moves use absolute XYZ and relative E; original modes and the source extrusion
 position are restored for shutdown. The historical 0.01 mm minimum mapped Z is
 retained. The regular G-code processor reads the resulting physical movements
 for preview and time estimation.
@@ -82,6 +148,16 @@ Surface lookup restores Orca's active extruder XY offset before evaluating the
 inverse. Commanded XY stays unchanged: the field is in model/nozzle coordinates,
 while exported G-code has the extruder offset subtracted. Filament tool commands
 select the corresponding configured extruder offset.
+
+Only Orca's existing hops are corrected. A nonextruding move above the active
+nominal layer height retains that virtual lift as a physical offset above the
+active surface and the hop's departure height. The base height can rise along
+the hop, so mapping a later regional surface cannot turn the lift into a drop.
+Orca's original landing restores the ordinary surface mapping. The inverse
+adds no clearance moves, deferred landings or retraction cycles. Travels for
+which Orca chose no hop retain the ordinary mapping. This is a correction of
+existing hops, not a collision planner. Extrusion, wipe, retraction and priming
+moves retain their mapping, order and feed rates.
 
 The inverse pass is idempotent: its marker prevents re-mapping an already
 exported file when Orca reuses a completed export.

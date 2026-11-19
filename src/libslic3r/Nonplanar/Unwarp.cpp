@@ -118,6 +118,7 @@ std::vector<Vec3d> motion_points(const Vec3d &from, const Vec3d &to, const Param
     points.back() = to;
     return points;
 }
+
 } // namespace
 
 void unwarp_gcode(Print &print, const Job &job, const std::string &path, GCodeProcessorResult *result)
@@ -152,27 +153,38 @@ void unwarp_gcode(Print &print, const Job &job, const std::string &path, GCodePr
         output.imbue(std::locale::classic());
         output << std::fixed << std::setprecision(6);
         Vec3d position = Vec3d::Constant(std::numeric_limits<double>::quiet_NaN());
+        Vec3d physical_position = position;
         double e_position = 0.;
+        double nominal_z = job.first_layer_height;
+        double hop_base = -std::numeric_limits<double>::infinity();
         bool absolute_xyz = true, absolute_e = true, absolute_center = false;
         std::string plane = "G17";
         Vec2d extruder_offset = print.config().extruder_offset.get_at(0);
         GCodeReader reader;
-        auto emit_point = [&](const Vec3d &point, bool z_only = false) {
+        auto map_point = [&](const Vec3d &point) -> Vec3d {
             // Orca subtracts the extruder offset from commanded XY. Surface
             // lookup needs the nozzle's model position, not carriage position.
             Vec3d model_point = point;
             model_point.head<2>() += extruder_offset;
             const Vec3d mapped = job.to_model(model_point);
+            return {point.x(), point.y(), std::max(.01, mapped.z())};
+        };
+        auto emit_point = [&](const Vec3d &point, bool z_only = false) {
             if (!z_only) output << " X" << point.x() << " Y" << point.y();
-            output << " Z" << std::max(.01, mapped.z());
+            output << " Z" << point.z();
+            physical_position = point;
         };
         for (size_t index = 0; index < last; ++index) {
             if ((index & 1023) == 0 && print.canceled()) throw CanceledException();
+            const std::string tag = trimmed_upper(lines[index]);
+            if (tag.rfind("; Z_HEIGHT:",0) == 0) {
+                nominal_z = std::strtod(tag.c_str()+std::string("; Z_HEIGHT:").size(), nullptr);
+            }
             const bool body = index >= first;
             if (index == first) {
                 if (!position.allFinite()) throw std::invalid_argument(_u8L("Model motion starts before all XYZ coordinates are established"));
                 output << inverse_marker << "\nG90\nM83\nG1";
-                emit_point(position, true);
+                emit_point(map_point(position), true);
                 output << '\n';
             }
             reader.parse_line(lines[index], [&](GCodeReader &, const GCodeReader::GCodeLine &line) {
@@ -180,8 +192,9 @@ void unwarp_gcode(Print &print, const Job &job, const std::string &path, GCodePr
                 const auto p = parameters(line);
                 if (command.size() > 1 && command.front() == 'T' && std::isdigit(static_cast<unsigned char>(command[1]))) {
                     const size_t filament = std::stoul(command.substr(1));
-                    if (filament < print.config().filament_map.size())
-                        extruder_offset = print.config().extruder_offset.get_at(print.config().filament_map.get_at(filament) - 1);
+                    if (filament < print.config().filament_map.size()) {
+                        extruder_offset = print.config().extruder_offset.get_at(print.config().filament_map.get_at(filament)-1);
+                    }
                 }
                 if (command == "G90" || command == "G91" || command == "M82" || command == "M83") {
                     if (command[0] == 'G') absolute_xyz = command == "G90";
@@ -222,6 +235,7 @@ void unwarp_gcode(Print &print, const Job &job, const std::string &path, GCodePr
                 const std::string other = extras(line);
                 const std::string comment = line.comment().empty() ? "" : ";" + std::string(line.comment());
                 if (!has_xyz && (command == "G0" || command == "G1")) {
+                    if (delta_e != 0.) hop_base = -std::numeric_limits<double>::infinity();
                     output << command;
                     if (has_e) output << " E" << delta_e;
                     output << other;
@@ -232,11 +246,25 @@ void unwarp_gcode(Print &print, const Job &job, const std::string &path, GCodePr
                     throw std::invalid_argument(_u8L("Model motion requires known XYZ coordinates"));
                 if ((command == "G2" || command == "G3") && plane != "G17")
                     throw std::invalid_argument(_u8L("Only XY-plane arcs can be inverse mapped"));
-                const auto points = motion_points(from, position, p, command, absolute_center, job.stack.limits.max_segment_length);
+                const auto points = motion_points(from, position, p, command, absolute_center, job.stack().limits.max_segment_length);
                 double allocated = 0.;
                 for (size_t n = 0; n < points.size(); ++n) {
+                    Vec3d mapped = map_point(points[n]);
+                    const double hop = points[n].z()-nominal_z;
+                    if (delta_e == 0. && hop > 1e-6) {
+                        // Preserve Orca's lift and landing moves. Its virtual hop
+                        // is a physical offset above this layer, not an index
+                        // into a later (possibly lower) regional surface.
+                        if (!std::isfinite(hop_base))
+                            hop_base = physical_position.z()-std::max(0.,from.z()-nominal_z);
+                        Vec3d top = points[n]; top.z() = nominal_z;
+                        hop_base = std::max(hop_base,map_point(top).z());
+                        mapped.z() = std::max(.01,hop_base+hop);
+                    } else {
+                        hop_base = -std::numeric_limits<double>::infinity();
+                    }
                     output << (command == "G0" ? "G0" : "G1");
-                    emit_point(points[n]);
+                    emit_point(mapped);
                     if (has_e) {
                         const double target = std::round(delta_e * double(n + 1) / double(points.size()) * 1e6) / 1e6;
                         output << " E" << target - allocated;

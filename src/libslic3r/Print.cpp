@@ -242,7 +242,7 @@ void Print::clear()
 	std::scoped_lock<std::mutex> lock(this->state_mutex());
     // The following call should stop background processing if it is running.
     this->invalidate_all_steps();
-    m_nonplanar_source.clear();
+    m_nonplanar_layers.reset();
     m_nonplanar_job.reset();
 	for (PrintObject *object : m_objects)
 		delete object;
@@ -3341,7 +3341,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 {
     if (nonplanar()) {
         if (use_cache) throw std::invalid_argument(_u8L("Supplied layers do not support planar slice caches"));
-        m_nonplanar_job = Nonplanar::prepare(*this, m_nonplanar_source);
+        m_nonplanar_job = Nonplanar::prepare(*this, m_nonplanar_layers);
     }
     long long start_time = 0, end_time = 0;
     if (time_cost_with_cache)

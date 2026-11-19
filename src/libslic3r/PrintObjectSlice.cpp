@@ -117,15 +117,22 @@ static std::vector<ExPolygons> slice_volume(
 {
     std::vector<ExPolygons> layers;
     if (! zs.empty()) {
-        indexed_triangle_set its = volume.mesh().its;
-        if (its.indices.size() > 0) {
-            MeshSlicingParamsEx params2 { params };
-            params2.trafo = params2.trafo * volume.get_matrix();
-            if (params2.trafo.rotation().determinant() < 0.)
-                its_flip_triangles(its);
-            layers = nonplanar ? Nonplanar::slice_volume(its, zs, params2, *nonplanar, throw_on_cancel_callback)
-                               : slice_mesh_ex(its, zs, params2, throw_on_cancel_callback);
-            throw_on_cancel_callback();
+        if (nonplanar) {
+            if (!volume.mesh().its.indices.empty()) {
+                MeshSlicingParamsEx params2 {params};
+                params2.trafo = params2.trafo * volume.get_matrix();
+                layers = Nonplanar::slice_volume(volume,zs,params2,*nonplanar,throw_on_cancel_callback);
+                throw_on_cancel_callback();
+            }
+        } else {
+            indexed_triangle_set its = volume.mesh().its;
+            if (!its.indices.empty()) {
+                MeshSlicingParamsEx params2 {params};
+                params2.trafo = params2.trafo * volume.get_matrix();
+                if (params2.trafo.rotation().determinant() < 0.) its_flip_triangles(its);
+                layers = slice_mesh_ex(its,zs,params2,throw_on_cancel_callback);
+                throw_on_cancel_callback();
+            }
         }
     }
     return layers;
@@ -917,7 +924,7 @@ void PrintObject::slice()
     std::vector<coordf_t> object_layers;
     if (m_print->nonplanar()) {
         const auto &job = *m_print->m_nonplanar_job;
-        for (size_t layer = 0; layer < job.stack.layers.size(); ++layer) {
+        for (size_t layer = 0; layer < job.stack().layers.size(); ++layer) {
             object_layers.push_back(layer ? job.layer_z(layer - 1) : 0.);
             object_layers.push_back(job.layer_z(layer));
         }
@@ -1411,6 +1418,29 @@ void PrintObject::slice_volumes()
             m_layers[layer_id]->regions()[region_id]->slices.append(std::move(by_layer[layer_id]), stInternal);
     }
     region_slices.clear();
+
+    if (nonplanar && nonplanar->job.stack().masked) {
+        MeshSlicingParamsEx reference_params;
+        reference_params.trafo = this->trafo_centered();
+        reference_params.closing_radius = m_config.slice_closing_radius.value;
+        reference_params.resolution = 0.0025;
+        for (Layer *layer : m_layers) layer->has_nonplanar_references = true;
+        for (int direction : {-1,1}) {
+            Nonplanar::SliceContext reference = *nonplanar;
+            reference.reference = true;
+            reference.reference_offset = direction * nonplanar->job.layer_height;
+            for (bool negative : {false,true}) for (const ModelVolume *volume : this->model_object()->volumes) {
+                if (negative ? !volume->is_negative_volume() : !volume->is_model_part()) continue;
+                auto slices = slice_volume(*volume,slice_zs,reference_params,throw_on_cancel_callback,&reference);
+                for (size_t k = 0; k < slices.size(); ++k) {
+                    auto &target = direction < 0 ? m_layers[k]->nonplanar_below : m_layers[k]->nonplanar_above;
+                    target = volume->is_negative_volume() ? diff_ex(target,slices[k]) : union_ex(target,slices[k]);
+                }
+            }
+        }
+    }
+
+    if (nonplanar) Nonplanar::log_slice_timings(*nonplanar);
 
     BOOST_LOG_TRIVIAL(debug) << "Slicing volumes - removing top empty layers";
     while (! m_layers.empty()) {

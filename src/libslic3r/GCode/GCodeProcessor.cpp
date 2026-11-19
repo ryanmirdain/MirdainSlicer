@@ -2943,6 +2943,10 @@ bool GCodeProcessor::check_multi_extruder_gcode_valid(const int                 
     Polygon wrapping_exclude_poly = Polygon::new_scale(wrapping_exclude_area);
 
     m_result.limit_filament_maps.resize(filament_map.size(), 0);
+    // Nonplanar G-code Z is the nominal, index-based layer height (Nonplanar::Job::layer_z),
+    // not physical height: a deep layer stack exceeds printable_height on a short part.
+    // The part's own size is validated against the build volume when it is placed.
+    const bool skip_height_check = m_belt_printer || (m_print != nullptr && m_print->nonplanar());
 
     auto to_2d = [](const Vec3d &pos) -> Point {
         Point ps(scale_(pos.x()), scale_(pos.y()));
@@ -3061,7 +3065,7 @@ bool GCodeProcessor::check_multi_extruder_gcode_valid(const int                 
             // clearance above the belt; the two are not comparable, so the over-height check
             // is skipped, as the preview's ToolHeightOutside warning already is.
             // Print::validate() checks the object's height against the clearance.
-            if ( !m_belt_printer && iter->second.max_print_z > plate_printable_height ) { //over height
+            if ( !skip_height_check && iter->second.max_print_z > plate_printable_height ) { //over height
                 m_result.gcode_check_result.error_code |= (1 << 3);
                 std::pair<int, int> filament_to_object_id;
                 filament_to_object_id.first  = iter->first;
@@ -3098,7 +3102,7 @@ bool GCodeProcessor::check_multi_extruder_gcode_valid(const int                 
                 }
 
                 // check printable height
-                if (!m_belt_printer && (extruder_id < printable_heights.size()) && (iter->second.max_print_z > printable_heights[extruder_id])) {
+                if (!skip_height_check && (extruder_id < printable_heights.size()) && (iter->second.max_print_z > printable_heights[extruder_id])) {
                     m_result.gcode_check_result.error_code |= (1 << 1);
                     std::pair<int, int> filament_to_object_id;
                     filament_to_object_id.first  = iter->first;

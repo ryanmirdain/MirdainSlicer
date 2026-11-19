@@ -3,12 +3,15 @@
 #include "../format.hpp"
 
 #include <nlohmann/json.hpp>
+#include <boost/log/trivial.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <filesystem>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 
 namespace Slic3r::Nonplanar {
@@ -40,6 +43,7 @@ std::vector<double> axis(const Json &j, const std::string &name)
 Surface surface(const Json &j, size_t nx, size_t ny, const std::string &label)
 {
     Surface s;
+    s.linear = j.value("interpolation", std::string()) == "linear";
     const std::string type = j.at("type").get<std::string>();
     if (type == "plane") {
         s.a = number(j.at("a"), label + ".a");
@@ -186,12 +190,15 @@ std::array<double,7> Patch::line(XY a, XY b) const
 
 LayerStack LayerStack::parse(const std::string &text)
 {
+    const auto started = std::chrono::steady_clock::now();
     LayerStack out;
     try {
         Json j = Json::parse(text);
         const bool interpolate = j.value("interpolate", true);
         if (j.at("format") != "orca_nonplanar_layers") invalid(_u8L("unknown format"));
-        if (!j.at("version").is_number_integer() || j.at("version") != 1) invalid(_u8L("version must be 1"));
+        if (!j.at("version").is_number_integer() || (j.at("version") != 1 && j.at("version") != 2))
+            invalid(_u8L("version must be 1 or 2"));
+        out.version = j.at("version").get<int>();
         if (j.at("units") != "mm") invalid(_u8L("units must be mm"));
         if (j.at("coordinate_system") != "plate_world_xyz") invalid(_u8L("coordinate_system must be plate_world_xyz"));
         if (!j.at("plate_index").is_number_integer() || j.at("plate_index") < 0 ||
@@ -215,10 +222,55 @@ LayerStack LayerStack::parse(const std::string &text)
         if (!layers.is_array() || layers.empty()) invalid(_u8L("layers must be a nonempty array"));
         for (size_t k = 0; k < layers.size(); ++k) {
             const auto &entry = layers[k];
+            if (j.at("version") == 1 && (entry.contains("clip_mask") || entry.contains("reference_surface")))
+                invalid(_u8L("Clipping masks and regional references require nonplanar format version 2"));
             if (!entry.at("id").is_number_integer() || entry.at("id").get<long long>() != static_cast<long long>(k))
                 invalid(_u8L("layer IDs must be consecutive from zero"));
             out.layers.push_back(surface(entry.at("surface"), out.x.size(), out.y.size(), "layer " + std::to_string(k)));
+            out.has_clip_mask.push_back(entry.contains("clip_mask"));
+            out.masked |= out.has_clip_mask.back();
+            ExPolygons mask;
+            if (entry.contains("clip_mask")) {
+                auto ring = [&](const Json &points) {
+                    if (!points.is_array() || points.size() < 3) invalid(_u8L("A clipping ring needs at least three XY points"));
+                    Polygon polygon;
+                    for (const auto &p : points) {
+                        if (!p.is_array() || p.size() != 2) invalid(_u8L("Clipping points must contain X and Y"));
+                        const double x = number(p[0], "clip x"), y = number(p[1], "clip y");
+                        if (x < out.x.front()-1e-6 || x > out.x.back()+1e-6 || y < out.y.front()-1e-6 || y > out.y.back()+1e-6)
+                            invalid(_u8L("Clipping mask extends outside the shared grid"));
+                        polygon.points.emplace_back(scaled<coord_t>(std::clamp(x,out.x.front(),out.x.back())),
+                                                    scaled<coord_t>(std::clamp(y,out.y.front(),out.y.back())));
+                    }
+                    return polygon;
+                };
+                for (const auto &region : entry.at("clip_mask")) {
+                    ExPolygon polygon;
+                    polygon.contour = ring(region.at("outer"));
+                    polygon.contour.make_counter_clockwise();
+                    if (region.contains("holes")) for (const auto &hole : region.at("holes")) {
+                        polygon.holes.push_back(ring(hole));
+                        polygon.holes.back().make_clockwise();
+                    }
+                    mask.push_back(std::move(polygon));
+                }
+            }
+            out.clip_masks.push_back(std::move(mask));
             if (entry.contains("level")) out.layers.back().level = number(entry.at("level"),"material scalar level");
+        }
+        const bool references = std::any_of(layers.begin(), layers.end(), [](const Json &entry) { return entry.contains("reference_surface"); });
+        if (references) for (const auto &entry : layers) {
+            if (!entry.contains("reference_surface")) invalid(_u8L("Regional layers must all provide a reference surface"));
+            const auto &reference = entry.at("reference_surface");
+            if (reference.at("type") == "offset") {
+                const double offset = number(reference.at("z_offset"), "reference z_offset");
+                if (offset >= 0.) invalid(_u8L("A regional layer must stay above its reference surface"));
+                out.reference_offsets.push_back(offset);
+                out.references.emplace_back();
+            } else {
+                out.reference_offsets.push_back(std::nullopt);
+                out.references.push_back(surface(reference, out.x.size(), out.y.size(), "reference surface"));
+            }
         }
         if (j.contains("material_field")) {
             const auto &field = j.at("material_field");
@@ -247,7 +299,7 @@ LayerStack LayerStack::parse(const std::string &text)
         };
         // Layer extensions may cross the bed outside printable material.
         // Require ordering only between supplied layer surfaces.
-        for (size_t k = 1; k < out.layers.size(); ++k)
+        for (size_t k = 1; k < out.layers.size() && !references; ++k)
             for (size_t j = 0; j < out.y.size(); ++j) for (size_t i = 0; i < out.x.size(); ++i) {
                 const double gap = sample(out.layers[k],i,j)-sample(out.layers[k-1],i,j);
                 if (!std::isfinite(gap) || gap <= 0.)
@@ -255,14 +307,14 @@ LayerStack LayerStack::parse(const std::string &text)
             }
         std::vector<std::vector<double>> wx, wy;
         auto build = [&](Surface &s) {
-            if (s.plane || !s.gx.empty() || !interpolate) {
+            if (s.plane || !s.gx.empty() || !interpolate || s.linear) {
                 s.min_z = std::numeric_limits<double>::infinity(); s.max_z = -s.min_z;
                 const size_t nx = out.x.size();
                 for (size_t j = 0; j+1 < out.y.size(); ++j) for (size_t i = 0; i+1 < nx; ++i) {
                     Patch p {out.x[i],out.y[j],out.x[i+1]-out.x[i],out.y[j+1]-out.y[j]};
-                    p.linear = !interpolate;
+                    p.linear = !interpolate || s.linear;
                     for (size_t b = 0; b < 4; ++b) for (size_t a = 0; a < 4; ++a) {
-                        if (!interpolate) {
+                        if (p.linear) {
                             const double u = double(a)/3., v = double(b)/3.;
                             p.control[b*4+a] = (1.-v)*((1.-u)*sample(s,i,j)+u*sample(s,i+1,j))
                                               + v*((1.-u)*sample(s,i,j+1)+u*sample(s,i+1,j+1));
@@ -302,16 +354,24 @@ LayerStack LayerStack::parse(const std::string &text)
         };
         build(out.bed);
         for (auto &s : out.layers) build(s);
-        for (size_t k = 1; k < out.layers.size(); ++k) if (!out.layers[k].gx.empty()) {
+        for (size_t k = 0; k < out.references.size(); ++k) if (!out.reference_offsets[k]) build(out.references[k]);
+        for (size_t k = 0; k < out.references.size(); ++k) if (!out.reference_offsets[k])
+            for (size_t p = 0; p < out.layers[k].patches.size(); ++p)
+                for (size_t n = 0; n < 16; ++n)
+                    if (out.layers[k].patches[p].control[n] <= out.references[k].patches[p].control[n])
+                        invalid(_u8L("A regional layer must stay above its reference surface"));
+        for (size_t k = 1; k < out.layers.size() && !references; ++k) if (!out.layers[k].gx.empty()) {
             const auto &below = out.layers[k-1];
             for (size_t p = 0; p < out.layers[k].patches.size(); ++p)
                 for (size_t n = 0; n < 16; ++n)
                     if (out.layers[k].patches[p].control[n] <= below.patches[p].control[n])
                         invalid(_u8L("Material-constrained surfaces cross between grid points"));
         }
-        if (!j.contains("surface_interpolation")) j["surface_interpolation"] = "ordered_cubic_bspline_v1";
-        out.source = j.dump();
+        out.source = text;
     } catch (const Json::exception &e) { invalid(e.what()); }
+    BOOST_LOG_TRIVIAL(info) << "Nonplanar input timings: " << Json({
+        {"parse_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count()},
+        {"input_bytes",text.size()},{"layer_count",out.layers.size()}}).dump();
     return out;
 }
 

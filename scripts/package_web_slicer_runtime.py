@@ -34,7 +34,8 @@ def main():
         repository = f'https://github.com/{args.repository}'
         release = {
             'repository': repository, 'version': version, 'revision': revision,
-            'layer_format': 'orca_nonplanar_layers', 'layer_format_version': 1,
+            # Version 2 adds XY clip masks and offset reference surfaces; version 1 stays accepted.
+            'layer_format': 'orca_nonplanar_layers', 'layer_format_version': 2,
             'assets': {args.arch: {'file': filename, 'sha256': checksum(source),
                                   'url': f'{repository}/releases/download/{args.tag}/{filename}'}},
         }

@@ -2424,7 +2424,11 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
                 // over-angle overhang that would print into air).
                 const bool belt_leading_gap = object.print()->config().belt_printer.value
                                            && last_extrusion_layer == nullptr;
-                if (!belt_leading_gap)
+                // Nonplanar layers get nominal print_z values from their index in the layer
+                // stack (Nonplanar::Job::layer_z), not their physical height, so a run of
+                // layers without extrusions (e.g. masked slivers) is not a physical gap.
+                const bool nonplanar_nominal_gap = object.print()->nonplanar();
+                if (!belt_leading_gap && !nonplanar_nominal_gap)
                     warning_ranges.emplace_back(std::make_pair((last_extrusion_layer ? last_extrusion_layer->print_z() : 0.), layers_to_print.back().print_z()));
             }
         }
