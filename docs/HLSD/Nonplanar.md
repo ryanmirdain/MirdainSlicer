@@ -37,10 +37,15 @@ about a physical gap. For the same reason the G-code processor skips its
 printable-height checks on nonplanar jobs; a deep layer stack on a short part
 would otherwise exceed `printable_height`. Object placement against the build
 volume still applies.
-The fork normalizes exterior/hole winding, converts masks into the same centered
-frame as the slice contours, and intersects closed `ExPolygons` after ordinary
-slice cleanup and before region assignment, perimeter generation, or infill.
-The input mesh and height grid are unchanged.
+The fork normalizes exterior/hole winding and stores masks in plate-world XY.
+Masked layers are sliced whole: walls, infill and ironing are planned on the
+complete mesh intersection, and only the finished toolpaths are clipped to the
+mask (`Nonplanar::clip_extrusions`, after ironing and before G-code export).
+Clipping the outline instead would turn the mask edge into a part boundary,
+putting walls along the cut and leaving narrow strips between a mask edge and
+the real outer surface too thin to print. Loops that cross a mask become open
+paths; collections per island are kept. Clipping is idempotent, so cached steps
+are safe to clip again. The input mesh and height grid are unchanged.
 
 Regional schedules may supply `reference_surface` on every layer. Each nominal
 layer interval then interpolates from that explicit reference to its own top
@@ -62,7 +67,10 @@ contours are separate from printable slices. Surface classification uses them
 to identify physical tops and bottoms; perimeter overhang and bridge direction
 checks use the lower reference. A mask edge therefore does not itself create an
 external top, bottom, or unsupported wall. The first printing layer retains the
-ordinary bottom-surface treatment. Perimeters and infill use only active slices.
+ordinary bottom-surface treatment. Steps that compare a layer with its
+neighbours in list order, such as vertical shell thickening and internal bridge
+detection, see whole slices; across region boundaries those neighbours are not
+what is actually printed above or below.
 
 Each placed volume is transformed and indexed once per slicing operation.
 Independent layers run through Orca's TBB pool. A layer task builds one conforming
@@ -70,7 +78,7 @@ surface tessellation and reuses it for vertical copies, including offset-based
 sampling surfaces. Tessellations are released inside the task; only completed
 contours are cached for later reference passes and repeated Z-range requests.
 An info-level `Nonplanar timings` JSON log records mesh transform, indexing,
-parallel contour wall time, polygon assembly, and mask clipping separately.
+parallel contour wall time, and polygon assembly separately.
 
 Validated layer stacks are immutable and shared by the importing model and
 print jobs. Metadata lookup reuses a stack only when its original JSON text

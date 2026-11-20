@@ -9,6 +9,11 @@
 #include "../Polygon.hpp"
 #include "../Point.hpp"
 #include "../Exception.hpp"
+#include "../ExtrusionEntity.hpp"
+#include "../ExtrusionEntityCollection.hpp"
+#include "../Layer.hpp"
+#include "../Polyline.hpp"
+#include <tbb/parallel_for.h>
 #include <Eigen/Geometry>
 #include <boost/log/trivial.hpp>
 #include <chrono>
@@ -97,7 +102,7 @@ std::shared_ptr<Job> prepare(Print &print, const std::shared_ptr<const LayerStac
 struct SliceCache {
     std::mutex mutex;
     std::map<const ModelVolume *,std::shared_ptr<MeshSlicer>> meshes;
-    double transform_seconds = 0., assembly_seconds = 0., mask_seconds = 0.;
+    double transform_seconds = 0., assembly_seconds = 0.;
 };
 std::shared_ptr<SliceCache> make_slice_cache() { return std::make_shared<SliceCache>(); }
 
@@ -142,26 +147,71 @@ std::vector<ExPolygons> slice_volume(const ModelVolume &volume, const std::vecto
                 polygon.make_counter_clockwise();
         }
     }
+    // Masked layers are sliced whole: clipping the outline here would make the
+    // mask edge a part boundary. clip_extrusions() ends the toolpaths instead.
     auto result = slice_mesh_ex(std::move(sections), params, cancel);
-    const auto mask_started = Clock::now();
-    if (!context.reference && context.job.stack().masked) {
-        const Point shift(scaled<coord_t>(context.xy_offset.x()),scaled<coord_t>(context.xy_offset.y()));
-        for (size_t n = 0; n < result.size(); ++n) {
-            const size_t k = std::min(context.job.stack().layers.size()-1,
-                size_t(std::max(0.,std::ceil((double(zs[n])-context.job.first_layer_height)/context.job.layer_height))));
-            if (!context.job.stack().has_clip_mask[k]) continue;
-            ExPolygons mask = context.job.stack().clip_masks[k];
-            for (auto &polygon : mask) polygon.translate(-shift);
-            result[n] = intersection_ex(result[n],mask);
-        }
-    }
-    const auto finished = Clock::now();
     {
         std::lock_guard<std::mutex> lock(context.cache->mutex);
-        context.cache->assembly_seconds += std::chrono::duration<double>(mask_started-assembly_started).count();
-        context.cache->mask_seconds += std::chrono::duration<double>(finished-mask_started).count();
+        context.cache->assembly_seconds += std::chrono::duration<double>(Clock::now()-assembly_started).count();
     }
     return result;
+}
+
+namespace {
+// Collections keep their identity; a path, multipath or loop crossing the mask
+// is replaced by the clipped pieces of its paths, so loops become open paths.
+void clip_entities(ExtrusionEntitiesPtr &entities, const ExPolygons &mask)
+{
+    ExtrusionEntitiesPtr clipped;
+    clipped.reserve(entities.size());
+    for (ExtrusionEntity *entity : entities) {
+        if (auto *collection = dynamic_cast<ExtrusionEntityCollection*>(entity)) {
+            clip_entities(collection->entities, mask);
+            if (collection->entities.empty()) delete collection;
+            else clipped.push_back(collection);
+            continue;
+        }
+        std::vector<const ExtrusionPath*> paths;
+        if (const auto *path = dynamic_cast<const ExtrusionPath*>(entity)) paths.push_back(path);
+        else if (const auto *multipath = dynamic_cast<const ExtrusionMultiPath*>(entity))
+            for (const auto &path : multipath->paths) paths.push_back(&path);
+        else if (const auto *loop = dynamic_cast<const ExtrusionLoop*>(entity))
+            for (const auto &path : loop->paths) paths.push_back(&path);
+        Polylines polylines;
+        for (const ExtrusionPath *path : paths) polylines.push_back(path->polyline.to_polyline());
+        if (diff_pl(polylines, mask).empty()) {
+            clipped.push_back(entity);
+            continue;
+        }
+        for (size_t n = 0; n < paths.size(); ++n)
+            for (Polyline &piece : intersection_pl(Polylines{polylines[n]}, mask)) {
+                auto *part = static_cast<ExtrusionPath*>(paths[n]->clone());
+                part->polyline = Polyline3(piece);
+                clipped.push_back(part);
+            }
+        delete entity;
+    }
+    entities = std::move(clipped);
+}
+} // namespace
+
+void clip_extrusions(PrintObject &object, const Job &job)
+{
+    const Point shift = object.instances().front().shift_without_plate_offset();
+    const auto &stack = job.stack();
+    tbb::parallel_for(size_t(0), object.layers().size(), [&](size_t n) {
+        Layer *layer = object.layers()[n];
+        const size_t k = std::min(stack.layers.size()-1,
+            size_t(std::max(0.,std::ceil((layer->slice_z-job.first_layer_height)/job.layer_height))));
+        if (!stack.has_clip_mask[k]) return;
+        ExPolygons mask = stack.clip_masks[k];
+        for (auto &polygon : mask) polygon.translate(-shift);
+        // Top-level entries stay: G-code expects one collection per island.
+        for (LayerRegion *region : layer->regions())
+            for (ExtrusionEntityCollection *collection : {&region->perimeters, &region->fills})
+                for (ExtrusionEntity *island : collection->entities)
+                    clip_entities(static_cast<ExtrusionEntityCollection*>(island)->entities, mask);
+    });
 }
 
 void log_slice_timings(const SliceContext &context)
@@ -177,7 +227,6 @@ void log_slice_timings(const SliceContext &context)
         {"mesh_count",context.cache->meshes.size()},
         {"transform_seconds",context.cache->transform_seconds},
         {"index_seconds",index},{"contour_seconds",contours},
-        {"assembly_seconds",context.cache->assembly_seconds},
-        {"mask_seconds",context.cache->mask_seconds}}).dump();
+        {"assembly_seconds",context.cache->assembly_seconds}}).dump();
 }
 } // namespace Slic3r::Nonplanar

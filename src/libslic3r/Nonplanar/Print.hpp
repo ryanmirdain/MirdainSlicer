@@ -13,6 +13,7 @@ namespace Slic3r {
 class Model;
 class ModelVolume;
 class Print;
+class PrintObject;
 struct GCodeProcessorResult;
 namespace Nonplanar {
 std::shared_ptr<const LayerStack> layer_stack(const Model &, int plate_index,
@@ -33,6 +34,8 @@ std::vector<ExPolygons> slice_volume(const ModelVolume &, const std::vector<floa
                                     const MeshSlicingParamsEx &, const SliceContext &,
                                     const std::function<void()> &cancel);
 void log_slice_timings(const SliceContext &);
+// Ends the toolpaths of masked layers at their clip masks. Idempotent.
+void clip_extrusions(PrintObject &, const Job &);
 // Historical inverse: map model movements, retaining total E and feed rates.
 void unwarp_gcode(Print &, const Job &, const std::string &path, GCodeProcessorResult *);
 } // namespace Nonplanar

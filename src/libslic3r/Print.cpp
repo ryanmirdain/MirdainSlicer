@@ -3663,6 +3663,12 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         }
     }
 
+    // Masked layers are planned from whole slices; only their toolpaths end at the
+    // mask. Clipping is idempotent, so objects whose steps were cached are safe.
+    if (nonplanar() && m_nonplanar_job->stack().masked)
+        for (PrintObject *obj : m_objects)
+            Nonplanar::clip_extrusions(*obj, *m_nonplanar_job);
+
     for (PrintObject *obj : m_objects)
     {
         if (need_slicing_objects.count(obj) == 0) {
