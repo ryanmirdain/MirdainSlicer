@@ -3611,6 +3611,24 @@ int CLI::run(int argc, char **argv)
                 if (opt_key != "filament_extruder_variant" && config.has(opt_key))
                     m_print_config.option(opt_key, true);
         normalize_filament_values_to_variants(m_print_config);
+        // Vector keys of a filament preset that are not one value per filament.
+        auto not_per_filament = [](const std::string &opt_key) {
+            return opt_key == "compatible_prints" || opt_key == "compatible_printers" || opt_key == "model_id" ||
+                   opt_key == "dev_model_name" || opt_key == "filament_settings_id";
+        };
+        //ORCA: an option only some loaded filaments define (Creality's Generic presets have no
+        //      filament_is_support, for one) would end up shorter than the filament count, since set_at
+        //      below grows it only up to the last filament that sets it. Start it at its default for
+        //      every filament, as the GUI builds every preset over the full defaults; each loaded
+        //      filament then sets its own value.
+        for (const DynamicPrintConfig &config : load_filaments_config)
+            for (const std::string &opt_key : config.keys()) {
+                if (m_print_config.has(opt_key) || !config.option(opt_key)->is_vector() || not_per_filament(opt_key) ||
+                    filament_options_with_variant.count(opt_key) > 0 || filament_dev_options.count(opt_key) > 0)
+                    continue;
+                if (auto *opt = dynamic_cast<ConfigOptionVectorBase *>(m_print_config.option(opt_key, true)))
+                    opt->resize(filament_count, print_config_def.get(opt_key)->default_value.get());
+            }
         for (int index = 0; index < load_filaments_config.size(); index++) {
             DynamicPrintConfig&  config = load_filaments_config[index];
             int filament_index = load_filaments_index[index];
@@ -3778,7 +3796,7 @@ int CLI::run(int argc, char **argv)
                 }
                 else
                 {
-                    if (opt_key == "compatible_prints" || opt_key == "compatible_printers" || opt_key == "model_id" || opt_key == "dev_model_name" || opt_key == "filament_settings_id")
+                    if (not_per_filament(opt_key))
                         continue;
                     // rebuilt from every filament after this loop
                     if (filament_dev_options.find(opt_key) != filament_dev_options.end())
@@ -3965,7 +3983,12 @@ int CLI::run(int argc, char **argv)
             }
 
             //computing
+            //ORCA: when no filament defines filament_is_support (QIDI's presets, for one), every filament
+            //      takes the default rather than the single value creating the option would give.
+            const bool support_flags_set = m_print_config.has("filament_is_support");
             ConfigOptionBools* filament_is_support = m_print_config.option<ConfigOptionBools>("filament_is_support", true);
+            if (!support_flags_set && project_filament_count > 0)
+                filament_is_support->resize(project_filament_count);
 
             const std::vector<int> &min_flush_volumes = Slic3r::GUI::get_min_flush_volumes(m_print_config, 0);
 
