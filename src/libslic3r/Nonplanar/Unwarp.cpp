@@ -177,9 +177,11 @@ void unwarp_gcode(Print &print, const Job &job, const std::string &path, GCodePr
         for (size_t index = 0; index < last; ++index) {
             if ((index & 1023) == 0 && print.canceled()) throw CanceledException();
             const std::string tag = trimmed_upper(lines[index]);
-            if (tag.rfind("; Z_HEIGHT:",0) == 0) {
-                nominal_z = std::strtod(tag.c_str()+std::string("; Z_HEIGHT:").size(), nullptr);
-            }
+            // GCode::process_layer tags the layer's print_z as "; Z_HEIGHT:" for BBL
+            // printers and ";Z:" for every other printer.
+            for (const std::string prefix : {"; Z_HEIGHT:", ";Z:"})
+                if (tag.rfind(prefix, 0) == 0)
+                    nominal_z = std::strtod(tag.c_str() + prefix.size(), nullptr);
             const bool body = index >= first;
             if (index == first) {
                 if (!position.allFinite()) throw std::invalid_argument(_u8L("Model motion starts before all XYZ coordinates are established"));
