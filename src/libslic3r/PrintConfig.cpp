@@ -6162,7 +6162,9 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Retraction distance when cut");
     def->tooltip = L("Experimental feature: Retraction length before cutting off during filament change.");
     def->mode = comDevelop;
-    def->min = 10;
+    //ORCA: 0 disables the cut retraction (GCode only uses it when > 0), and vendor profiles for printers
+    //      without a cutter store 0. A minimum of 10 made the CLI reject those profiles outright.
+    def->min = 0;
     def->max = 18;
     def->set_default_value(new ConfigOptionFloats {18});
 
