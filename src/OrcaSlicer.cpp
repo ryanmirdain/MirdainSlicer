@@ -4351,7 +4351,20 @@ int CLI::run(int argc, char **argv)
         m_print_config.apply(sla_print_config, true);*/
     }
 
+    // Match the GUI, which runs these preset value checks only on 3MF import and only
+    // as a notification, so out-of-range vendor values still slice there. Print::validate
+    // still gates slicing. The CLI-only spiral vase checks stay fatal: the GUI resolves
+    // those with a dialog that changes the settings, which the CLI cannot show.
+    std::map<std::string, std::string> invalid = m_print_config.validate(false);
+    if (!invalid.empty()) {
+        boost::nowide::cerr << "Param values in 3mf/config out of range, slicing as the GUI does: " << std::endl;
+        for (const auto &[key, message] : invalid)
+            boost::nowide::cerr << key << ": " << message << std::endl;
+    }
     std::map<std::string, std::string> validity = m_print_config.validate(true);
+    for (const auto &[key, message] : invalid)
+        if (auto it = validity.find(key); it != validity.end() && it->second == message)
+            validity.erase(it);
     if (!validity.empty()) {
         boost::nowide::cerr << "Param values in 3mf/config error: "<< std::endl;
         for (std::map<std::string, std::string>::iterator it=validity.begin(); it!=validity.end(); ++it)
