@@ -491,7 +491,9 @@ Vec3d Job::to_model(const Vec3d &point) const
     // Every surface shares the grid: find the cell once, then evaluate each
     // surface's patch in place (what LayerStack::value does per call).
     const auto [i, j] = stack.cell(xy);
-    const auto value = [&](const Surface &s) { return s.patches[j*(stack.x.size()-1)+i].value(xy); };
+    // C++17 lambdas cannot capture structured bindings, so capture the patch index.
+    const size_t patch = j*(stack.x.size()-1)+i;
+    const auto value = [&](const Surface &s) { return s.patches[patch].value(xy); };
     double z;
     if (point.z() <= 0.) {
         z = value(stack.bed) + point.z();
