@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <cstdint>
 #include <iomanip>
 #include <limits>
 #include <locale>
@@ -20,6 +21,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 #include <utility>
@@ -37,16 +39,44 @@ std::string trimmed_upper(std::string value)
     return value;
 }
 
-using Parameters = std::map<char, double>;
+// Parsed axis words A-Z of one line, with std::map's count()/at() lookups but
+// no per-line heap allocation.
+class Parameters {
+public:
+    size_t count(char axis) const { return (m_present >> (axis - 'A')) & 1u; }
+    double at(char axis) const
+    {
+        if (!count(axis)) throw std::out_of_range("G-code parameter");
+        return m_values[size_t(axis - 'A')];
+    }
+    void set(char axis, double value) { m_present |= 1u << (axis - 'A'); m_values[size_t(axis - 'A')] = value; }
+private:
+    std::uint32_t m_present = 0;
+    std::array<double, 26> m_values;
+};
+// One pass over the words with GCodeReader::axis_pos()'s rules: words after the
+// command, up to the end of line or comment; only the first word of each axis
+// letter counts, and it is dropped when no number follows the letter.
 Parameters parameters(const GCodeReader::GCodeLine &line)
 {
+    const auto whitespace = [](char c) { return c == ' ' || c == '\t'; };
+    const auto line_end = [](char c) { return c == ';' || c == '\r' || c == '\n' || c == 0; };
+    const auto skip_word = [&](const char *c) { while (!whitespace(*c) && !line_end(*c)) ++c; return c; };
     Parameters values;
-    for (char axis = 'A'; axis <= 'Z'; ++axis) {
-        const auto word = line.axis_pos(axis);
-        if (word.empty()) continue;
-        char *end;
-        const double value = std::strtod(word.data() + 1, &end);
-        if (end != word.data() + 1) values[axis] = value;
+    std::array<bool, 26> seen{};
+    const char *c = line.raw().c_str();
+    while (whitespace(*c)) ++c;
+    c = skip_word(c);
+    while (!line_end(*c)) {
+        while (whitespace(*c)) ++c;
+        if (line_end(*c)) break;
+        if (*c >= 'A' && *c <= 'Z' && !seen[*c - 'A']) {
+            seen[*c - 'A'] = true;
+            char *end;
+            const double value = std::strtod(c + 1, &end);
+            if (end != c + 1) values.set(*c, value);
+        }
+        c = skip_word(c);
     }
     return values;
 }
@@ -55,12 +85,20 @@ std::string extras(const GCodeReader::GCodeLine &line)
 {
     const auto command = line.cmd();
     const auto offset = size_t(command.data() - line.raw().data()) + command.size();
-    const auto comment = line.raw().find(';', offset);
-    std::istringstream words(line.raw().substr(offset, comment - offset));
-    std::string word, result;
-    while (words >> word)
-        if (std::string("XYZEIJR").find(char(std::toupper(static_cast<unsigned char>(word.front())))) == std::string::npos)
-            result += " " + word;
+    const auto comment = std::min(line.raw().find(';', offset), line.raw().size());
+    // Words split on the classic locale's whitespace, as istringstream >> did.
+    const auto space = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'; };
+    const char *c = line.raw().data() + offset, *end = line.raw().data() + comment;
+    std::string result;
+    while (c != end) {
+        if (space(*c)) { ++c; continue; }
+        const char *start = c;
+        while (c != end && !space(*c)) ++c;
+        if (std::string_view("XYZEIJR").find(char(std::toupper(static_cast<unsigned char>(*start)))) == std::string_view::npos) {
+            result += ' ';
+            result.append(start, c);
+        }
+    }
     return result;
 }
 
@@ -148,7 +186,12 @@ void unwarp_gcode(Print &print, const Job &job, const std::string &path, GCodePr
         if (first == lines.size() || last == lines.size())
             throw std::invalid_argument(_u8L("Orca part/feature and machine-end markers are required for nonplanar inverse mapping"));
         const std::string temporary = path + ".unwarp";
-        boost::nowide::ofstream output(temporary, std::ios::binary);
+        // Subdivided moves make this file many times the planar G-code. A large
+        // buffer (set before opening) turns thousands of small writes into few.
+        std::vector<char> buffer(size_t(4) << 20);
+        boost::nowide::ofstream output;
+        output.rdbuf()->pubsetbuf(buffer.data(), std::streamsize(buffer.size()));
+        output.open(temporary, std::ios::binary);
         output.exceptions(std::ios::failbit | std::ios::badbit);
         output.imbue(std::locale::classic());
         output << std::fixed << std::setprecision(6);
@@ -169,19 +212,25 @@ void unwarp_gcode(Print &print, const Job &job, const std::string &path, GCodePr
             const Vec3d mapped = job.to_model(model_point);
             return {point.x(), point.y(), std::max(.01, mapped.z())};
         };
+        // The same digits as the stream's fixed, 6-decimal classic-locale output,
+        // without its per-number formatting overhead on millions of moves.
+        auto number = [](double value) { return float_to_string_decimal_point(value, 6); };
         auto emit_point = [&](const Vec3d &point, bool z_only = false) {
-            if (!z_only) output << " X" << point.x() << " Y" << point.y();
-            output << " Z" << point.z();
+            if (!z_only) output << " X" << number(point.x()) << " Y" << number(point.y());
+            output << " Z" << number(point.z());
             physical_position = point;
         };
         for (size_t index = 0; index < last; ++index) {
             if ((index & 1023) == 0 && print.canceled()) throw CanceledException();
-            const std::string tag = trimmed_upper(lines[index]);
             // GCode::process_layer tags the layer's print_z as "; Z_HEIGHT:" for BBL
-            // printers and ";Z:" for every other printer.
-            for (const std::string prefix : {"; Z_HEIGHT:", ";Z:"})
-                if (tag.rfind(prefix, 0) == 0)
-                    nominal_z = std::strtod(tag.c_str() + prefix.size(), nullptr);
+            // printers and ";Z:" for every other printer. Both tags are comments.
+            const auto text = lines[index].find_first_not_of(" \t\r\n");
+            if (text != std::string::npos && lines[index][text] == ';') {
+                const std::string tag = trimmed_upper(lines[index]);
+                for (const std::string prefix : {"; Z_HEIGHT:", ";Z:"})
+                    if (tag.rfind(prefix, 0) == 0)
+                        nominal_z = std::strtod(tag.c_str() + prefix.size(), nullptr);
+            }
             const bool body = index >= first;
             if (index == first) {
                 if (!position.allFinite()) throw std::invalid_argument(_u8L("Model motion starts before all XYZ coordinates are established"));
@@ -239,7 +288,7 @@ void unwarp_gcode(Print &print, const Job &job, const std::string &path, GCodePr
                 if (!has_xyz && (command == "G0" || command == "G1")) {
                     if (delta_e != 0.) hop_base = -std::numeric_limits<double>::infinity();
                     output << command;
-                    if (has_e) output << " E" << delta_e;
+                    if (has_e) output << " E" << number(delta_e);
                     output << other;
                     if (!comment.empty()) output << " " << comment;
                     output << '\n'; return;
@@ -269,7 +318,7 @@ void unwarp_gcode(Print &print, const Job &job, const std::string &path, GCodePr
                     emit_point(mapped);
                     if (has_e) {
                         const double target = std::round(delta_e * double(n + 1) / double(points.size()) * 1e6) / 1e6;
-                        output << " E" << target - allocated;
+                        output << " E" << number(target - allocated);
                         allocated = target;
                     }
                     if (n == 0) output << other;

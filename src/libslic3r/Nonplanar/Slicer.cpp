@@ -22,7 +22,6 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -43,6 +42,8 @@ std::vector<XYZ> clip_axis(const std::vector<XYZ> &polygon, int axis, double val
 {
     std::vector<XYZ> out;
     if (polygon.empty()) return out;
+    // A half-plane adds at most one vertex to a convex polygon.
+    out.reserve(polygon.size()+1);
     auto f = [=](XYZ p) { return (axis == 0 ? p.x : p.y)-value; };
     XYZ a = polygon.back();
     double fa = f(a);
@@ -73,7 +74,14 @@ class Intersection {
     // minima skip pieces that start above the facet without changing the
     // visiting order, which fixes contour node order and output.
     static constexpr size_t z_block = 16;
-    struct ZIndex { std::vector<double> min_z, block_min_z; };
+    // XY bounds per piece, in the same order. Any intersection lies on both
+    // triangles up to roundoff, so a piece whose bounds are separated from a
+    // facet's by more than xy_margin cannot emit a segment and is skipped.
+    static constexpr double xy_margin = 1e-6;
+    struct XYBox { double x0, x1, y0, y1; };
+    // suffix_min_z[b] is the lowest min_z from block b to the end: once it is
+    // above a facet, no later piece can reach it and the scan stops.
+    struct ZIndex { std::vector<double> min_z, block_min_z, suffix_min_z; std::vector<XYBox> xy; };
     std::vector<ZIndex> z_index;
     using MeshEdge = std::pair<size_t,size_t>;
     std::map<MeshEdge,MeshEdge> collapsed_edges;
@@ -122,10 +130,15 @@ public:
             }
             const auto [i0,j0] = stack.cell({xmin,ymin});
             const auto [i1,j1] = stack.cell({xmax,ymax});
+            // Within a single cell every vertex is inside all four half-planes,
+            // so clipping returns the triangle unchanged, in the same order.
+            const bool single = i0 == i1 && j0 == j1;
             for (size_t j = j0; j <= j1; ++j) for (size_t i = i0; i <= i1; ++i) {
                 std::vector<XYZ> polygon(t.vertices.begin(),t.vertices.end());
-                polygon = clip_axis(polygon,0,stack.x[i],true); polygon = clip_axis(polygon,0,stack.x[i+1],false);
-                polygon = clip_axis(polygon,1,stack.y[j],true); polygon = clip_axis(polygon,1,stack.y[j+1],false);
+                if (!single) {
+                    polygon = clip_axis(polygon,0,stack.x[i],true); polygon = clip_axis(polygon,0,stack.x[i+1],false);
+                    polygon = clip_axis(polygon,1,stack.y[j],true); polygon = clip_axis(polygon,1,stack.y[j+1],false);
+                }
                 if (polygon.size() < 3) continue;
                 XYZ sum {0.,0.,0.};
                 for (size_t v = 1; v+1 < polygon.size(); ++v) {
@@ -146,10 +159,22 @@ public:
             std::sort(pieces.begin(),pieces.end(),[](const Piece &a, const Piece &b) { return a.max_z < b.max_z; });
             auto &index = z_index[cell];
             index.min_z.reserve(pieces.size());
-            for (const Piece &piece : pieces) index.min_z.push_back(piece.min_z);
+            index.xy.reserve(pieces.size());
+            for (const Piece &piece : pieces) {
+                index.min_z.push_back(piece.min_z);
+                XYBox box {piece.polygon[0].x,piece.polygon[0].x,piece.polygon[0].y,piece.polygon[0].y};
+                for (XYZ p : piece.polygon) {
+                    box.x0 = std::min(box.x0,p.x); box.x1 = std::max(box.x1,p.x);
+                    box.y0 = std::min(box.y0,p.y); box.y1 = std::max(box.y1,p.y);
+                }
+                index.xy.push_back(box);
+            }
             for (size_t n = 0; n < pieces.size(); n += z_block)
                 index.block_min_z.push_back(*std::min_element(index.min_z.begin()+n,
                     index.min_z.begin()+std::min(n+z_block,pieces.size())));
+            index.suffix_min_z = index.block_min_z;
+            for (size_t b = index.suffix_min_z.size(); b-- > 1;)
+                index.suffix_min_z[b-1] = std::min(index.suffix_min_z[b-1],index.suffix_min_z[b]);
         }
     }
 
@@ -221,7 +246,18 @@ public:
             }
         };
         // Lookups only; never iterated, so hashing cannot change node order.
-        std::unordered_map<BucketKey,std::vector<size_t>,BucketHash> buckets;
+        // Open addressing with each bucket's nodes chained in insertion order
+        // (next_in_bucket), the order the former per-bucket vectors kept.
+        constexpr size_t none = std::numeric_limits<size_t>::max();
+        struct Slot { BucketKey key; size_t head = none, tail = none; };
+        std::vector<Slot> slots(1024);
+        size_t used_slots = 0;
+        std::vector<size_t> next_in_bucket;
+        const auto slot_of = [&](const BucketKey &key) {
+            size_t s = BucketHash()(key) & (slots.size()-1);
+            while (slots[s].head != none && !(slots[s].key == key)) s = (s+1) & (slots.size()-1);
+            return s;
+        };
         std::vector<std::pair<size_t,size_t>> unique;
         constexpr double join = 2e-6;
         auto node = [&](XYZ position, const Piece &piece) {
@@ -232,18 +268,27 @@ public:
                 feature = {1,edge.first,edge.second};
             }
             const int64_t x = std::llround(p.x/join), y = std::llround(p.y/join);
-            for (int dx = -1; dx <= 1; ++dx) for (int dy = -1; dy <= 1; ++dy) {
-                auto it = buckets.find({feature,x+dx,y+dy});
-                if (it != buckets.end()) for (size_t n : it->second)
+            for (int dx = -1; dx <= 1; ++dx) for (int dy = -1; dy <= 1; ++dy)
+                for (size_t n = slots[slot_of({feature,x+dx,y+dy})].head; n != none; n = next_in_bucket[n])
                     if (std::hypot(nodes[n].p.x-p.x,nodes[n].p.y-p.y) <= join) return n;
-            }
             const size_t n = nodes.size();
-            nodes.push_back({p,{}}); buckets[{feature,x,y}].push_back(n); return n;
+            nodes.push_back({p,{}});
+            next_in_bucket.push_back(none);
+            if (2*(used_slots+1) > slots.size()) {
+                std::vector<Slot> old(slots.size()*2);
+                old.swap(slots);
+                for (const Slot &slot : old) if (slot.head != none) slots[slot_of(slot.key)] = slot;
+            }
+            Slot &slot = slots[slot_of({feature,x,y})];
+            if (slot.head == none) { slot = {{feature,x,y},n,n}; ++used_slots; }
+            else { next_in_bucket[slot.tail] = n; slot.tail = n; }
+            return n;
         };
         auto line = [&](XYZ a, XYZ b, const Piece &piece) {
             const size_t na = node(a,piece), nb = node(b,piece);
             if (na != nb) unique.push_back({na,nb});
         };
+        std::vector<size_t> candidates;
         for (size_t cell = 0; cell < cells.size(); ++cell) {
             cancel();
             const auto &tessellation = surface.cells[cell];
@@ -252,23 +297,49 @@ public:
                 [](const Piece &p, double z) { return p.max_z < z; });
             const size_t sx = tessellation.sx, sy = tessellation.sy;
             const auto &vertices = tessellation.vertices;
-            auto facet = [&](std::array<XYZ,3> triangle) {
+            // A quad's two facets are traced one after the other. One scan with the
+            // quad's combined bounds collects, in piece order, a superset of each
+            // facet's candidates; each facet then applies its own tests to that
+            // list, so the pieces traced and their order are unchanged.
+            struct Bounds { double lo, hi, x0, x1, y0, y1; };
+            auto bounds = [&](std::array<XYZ,3> &triangle) {
                 for (XYZ &p : triangle) p.z += offset;
-                const double lo = std::min({triangle[0].z,triangle[1].z,triangle[2].z});
-                const double hi = std::max({triangle[0].z,triangle[1].z,triangle[2].z});
-                const auto &index = z_index[cell];
-                size_t n = size_t(std::lower_bound(first,cells[cell].end(),lo,
-                    [](const Piece &p, double z) { return p.max_z < z; })-cells[cell].begin());
-                while (n < index.min_z.size()) {
-                    if (n%z_block == 0 && index.block_min_z[n/z_block] > hi) { n += z_block; continue; }
-                    if (index.min_z[n] <= hi) trace(cells[cell][n],triangle,line);
-                    ++n;
-                }
+                return Bounds {std::min({triangle[0].z,triangle[1].z,triangle[2].z}),
+                               std::max({triangle[0].z,triangle[1].z,triangle[2].z}),
+                               std::min({triangle[0].x,triangle[1].x,triangle[2].x})-xy_margin,
+                               std::max({triangle[0].x,triangle[1].x,triangle[2].x})+xy_margin,
+                               std::min({triangle[0].y,triangle[1].y,triangle[2].y})-xy_margin,
+                               std::max({triangle[0].y,triangle[1].y,triangle[2].y})+xy_margin};
+            };
+            const auto &index = z_index[cell];
+            const auto overlaps = [&](size_t n, const Bounds &b) {
+                const XYBox &box = index.xy[n];
+                return box.x0 <= b.x1 && box.x1 >= b.x0 && box.y0 <= b.y1 && box.y1 >= b.y0;
             };
             for (size_t v = 0; v < sy; ++v) for (size_t u = 0; u < sx; ++u) {
-                const size_t n = v*(sx+1)+u;
-                facet({vertices[n],vertices[n+1],vertices[n+sx+2]});
-                facet({vertices[n],vertices[n+sx+2],vertices[n+sx+1]});
+                const size_t k = v*(sx+1)+u;
+                std::array<std::array<XYZ,3>,2> facets {{{vertices[k],vertices[k+1],vertices[k+sx+2]},
+                                                         {vertices[k],vertices[k+sx+2],vertices[k+sx+1]}}};
+                const std::array<Bounds,2> facet_bounds {bounds(facets[0]),bounds(facets[1])};
+                const Bounds quad {std::min(facet_bounds[0].lo,facet_bounds[1].lo),std::max(facet_bounds[0].hi,facet_bounds[1].hi),
+                                   std::min(facet_bounds[0].x0,facet_bounds[1].x0),std::max(facet_bounds[0].x1,facet_bounds[1].x1),
+                                   std::min(facet_bounds[0].y0,facet_bounds[1].y0),std::max(facet_bounds[0].y1,facet_bounds[1].y1)};
+                candidates.clear();
+                size_t n = size_t(std::lower_bound(first,cells[cell].end(),quad.lo,
+                    [](const Piece &p, double z) { return p.max_z < z; })-cells[cell].begin());
+                while (n < index.min_z.size()) {
+                    if (n%z_block == 0) {
+                        if (index.suffix_min_z[n/z_block] > quad.hi) break;
+                        if (index.block_min_z[n/z_block] > quad.hi) { n += z_block; continue; }
+                    }
+                    if (index.min_z[n] <= quad.hi && overlaps(n,quad)) candidates.push_back(n);
+                    ++n;
+                }
+                for (size_t f = 0; f < 2; ++f)
+                    for (size_t c : candidates)
+                        if (cells[cell][c].max_z >= facet_bounds[f].lo && index.min_z[c] <= facet_bounds[f].hi &&
+                            overlaps(c,facet_bounds[f]))
+                            trace(cells[cell][c],facets[f],line);
             }
         }
         // Shared surface facets may report a segment twice. A tangential mesh
@@ -417,19 +488,23 @@ Vec3d Job::to_model(const Vec3d &point) const
     const XY xy {std::clamp(point.x(), stack.x.front(), stack.x.back()),
                  std::clamp(point.y(), stack.y.front(), stack.y.back())};
     const size_t last = stack.layers.size() - 1;
+    // Every surface shares the grid: find the cell once, then evaluate each
+    // surface's patch in place (what LayerStack::value does per call).
+    const auto [i, j] = stack.cell(xy);
+    const auto value = [&](const Surface &s) { return s.patches[j*(stack.x.size()-1)+i].value(xy); };
     double z;
     if (point.z() <= 0.) {
-        z = stack.value(stack.bed, xy) + point.z();
+        z = value(stack.bed) + point.z();
     } else if (point.z() >= layer_z(last)) {
-        z = stack.value(stack.layers[last], xy) + point.z() - layer_z(last);
+        z = value(stack.layers[last]) + point.z() - layer_z(last);
     } else {
         const size_t layer = size_t(std::max(0., std::ceil((point.z() - first_layer_height) / layer_height)));
         const double fraction = (point.z() - (layer ? layer_z(layer - 1) : 0.)) /
                                 (layer ? layer_height : first_layer_height);
         const auto offset = stack.references.empty() ? std::optional<double>() : stack.reference_offsets[layer];
-        const double below = stack.value(stack.references.empty() ? (layer ? stack.layers[layer - 1] : stack.bed) :
-                                         offset ? stack.layers[layer] : stack.references[layer], xy) + offset.value_or(0.);
-        z = below + fraction * (stack.value(stack.layers[layer], xy) - below);
+        const double below = value(stack.references.empty() ? (layer ? stack.layers[layer - 1] : stack.bed) :
+                                   offset ? stack.layers[layer] : stack.references[layer]) + offset.value_or(0.);
+        z = below + fraction * (value(stack.layers[layer]) - below);
     }
     return {point.x(), point.y(), z};
 }

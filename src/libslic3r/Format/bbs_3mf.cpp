@@ -3571,7 +3571,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool res = true;
         unsigned int num_attributes = (unsigned int)XML_GetSpecifiedAttributeCount(m_xml_parser);
 
-        if (::strcmp(MODEL_TAG, name) == 0)
+        // The tags are distinct, so at most one branch matches; vertex and triangle
+        // come first because a mesh has one element of either per vertex/face.
+        if (::strcmp(VERTEX_TAG, name) == 0)
+            res = _handle_start_vertex(attributes, num_attributes);
+        else if (::strcmp(TRIANGLE_TAG, name) == 0)
+            res = _handle_start_triangle(attributes, num_attributes);
+        else if (::strcmp(MODEL_TAG, name) == 0)
             res = _handle_start_model(attributes, num_attributes);
         else if (::strcmp(RESOURCES_TAG, name) == 0)
             res = _handle_start_resources(attributes, num_attributes);
@@ -3585,12 +3591,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             res = _handle_start_mesh(attributes, num_attributes);
         else if (::strcmp(VERTICES_TAG, name) == 0)
             res = _handle_start_vertices(attributes, num_attributes);
-        else if (::strcmp(VERTEX_TAG, name) == 0)
-            res = _handle_start_vertex(attributes, num_attributes);
         else if (::strcmp(TRIANGLES_TAG, name) == 0)
             res = _handle_start_triangles(attributes, num_attributes);
-        else if (::strcmp(TRIANGLE_TAG, name) == 0)
-            res = _handle_start_triangle(attributes, num_attributes);
         else if (::strcmp(COMPONENTS_TAG, name) == 0)
             res = _handle_start_components(attributes, num_attributes);
         else if (::strcmp(COMPONENT_TAG, name) == 0)
@@ -3613,7 +3615,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         bool res = true;
 
-        if (::strcmp(MODEL_TAG, name) == 0)
+        // The tags are distinct, so at most one branch matches; vertex and triangle
+        // come first because a mesh has one element of either per vertex/face.
+        if (::strcmp(VERTEX_TAG, name) == 0)
+            res = _handle_end_vertex();
+        else if (::strcmp(TRIANGLE_TAG, name) == 0)
+            res = _handle_end_triangle();
+        else if (::strcmp(MODEL_TAG, name) == 0)
             res = _handle_end_model();
         else if (::strcmp(RESOURCES_TAG, name) == 0)
             res = _handle_end_resources();
@@ -3627,12 +3635,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             res = _handle_end_mesh();
         else if (::strcmp(VERTICES_TAG, name) == 0)
             res = _handle_end_vertices();
-        else if (::strcmp(VERTEX_TAG, name) == 0)
-            res = _handle_end_vertex();
         else if (::strcmp(TRIANGLES_TAG, name) == 0)
             res = _handle_end_triangles();
-        else if (::strcmp(TRIANGLE_TAG, name) == 0)
-            res = _handle_end_triangle();
         else if (::strcmp(COMPONENTS_TAG, name) == 0)
             res = _handle_end_components();
         else if (::strcmp(COMPONENT_TAG, name) == 0)

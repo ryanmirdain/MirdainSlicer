@@ -13,6 +13,9 @@
 #include "../ExtrusionEntityCollection.hpp"
 #include "../Layer.hpp"
 #include "../Polyline.hpp"
+#include "../BoundingBox.hpp"
+#include "../ExPolygon.hpp"
+#include "../Line.hpp"
 #include <tbb/parallel_for.h>
 #include <Eigen/Geometry>
 #include <boost/log/trivial.hpp>
@@ -158,15 +161,68 @@ std::vector<ExPolygons> slice_volume(const ModelVolume &volume, const std::vecto
 }
 
 namespace {
+// The mask's edges bucketed on a uniform grid. An entity whose bounding box no
+// edge reaches lies wholly inside or wholly outside the mask, so one point
+// classifies it and the Clipper runs can be skipped.
+class MaskIndex {
+public:
+    explicit MaskIndex(ExPolygons mask) : m_mask(std::move(mask)), m_lines(to_lines(m_mask)), m_box(get_extents(m_mask))
+    {
+        if (!m_box.defined) return;
+        const auto side = coord_t(std::clamp(std::sqrt(double(m_lines.size())), 1., 256.));
+        const Point size = m_box.size();
+        m_cell = std::max<coord_t>(1, std::max(size.x(), size.y()) / side + 1);
+        m_columns = size.x() / m_cell + 1;
+        m_cells.resize(size_t(m_columns * (size.y() / m_cell + 1)));
+        for (size_t n = 0; n < m_lines.size(); ++n) {
+            const BoundingBox box = line_box(n);
+            for (coord_t y = (box.min.y() - m_box.min.y()) / m_cell; y <= (box.max.y() - m_box.min.y()) / m_cell; ++y)
+                for (coord_t x = (box.min.x() - m_box.min.x()) / m_cell; x <= (box.max.x() - m_box.min.x()) / m_cell; ++x)
+                    m_cells[size_t(y * m_columns + x)].push_back(n);
+        }
+    }
+    const ExPolygons &mask() const { return m_mask; }
+    // Conservative: true when any edge's bounding box meets `box`.
+    bool touches(const BoundingBox &box) const
+    {
+        if (!m_box.defined || !m_box.overlap(box)) return false;
+        const Point size = m_box.size();
+        const auto clamp = [this](coord_t value, coord_t high) { return std::clamp<coord_t>(value / m_cell, 0, high / m_cell); };
+        for (coord_t y = clamp(box.min.y() - m_box.min.y(), size.y()); y <= clamp(box.max.y() - m_box.min.y(), size.y()); ++y)
+            for (coord_t x = clamp(box.min.x() - m_box.min.x(), size.x()); x <= clamp(box.max.x() - m_box.min.x(), size.x()); ++x)
+                for (size_t n : m_cells[size_t(y * m_columns + x)])
+                    if (line_box(n).overlap(box)) return true;
+        return false;
+    }
+    bool contains(const Point &point) const
+    {
+        return std::any_of(m_mask.begin(), m_mask.end(), [&](const ExPolygon &expolygon) { return expolygon.contains(point); });
+    }
+private:
+    BoundingBox line_box(size_t n) const
+    {
+        BoundingBox box;
+        box.merge(m_lines[n].a);
+        box.merge(m_lines[n].b);
+        return box;
+    }
+    ExPolygons m_mask;
+    Lines m_lines;
+    BoundingBox m_box;
+    coord_t m_cell = 1, m_columns = 1;
+    std::vector<std::vector<size_t>> m_cells;
+};
+
 // Collections keep their identity; a path, multipath or loop crossing the mask
 // is replaced by the clipped pieces of its paths, so loops become open paths.
-void clip_entities(ExtrusionEntitiesPtr &entities, const ExPolygons &mask)
+void clip_entities(ExtrusionEntitiesPtr &entities, const MaskIndex &index)
 {
+    const ExPolygons &mask = index.mask();
     ExtrusionEntitiesPtr clipped;
     clipped.reserve(entities.size());
     for (ExtrusionEntity *entity : entities) {
         if (auto *collection = dynamic_cast<ExtrusionEntityCollection*>(entity)) {
-            clip_entities(collection->entities, mask);
+            clip_entities(collection->entities, index);
             if (collection->entities.empty()) delete collection;
             else clipped.push_back(collection);
             continue;
@@ -179,6 +235,19 @@ void clip_entities(ExtrusionEntitiesPtr &entities, const ExPolygons &mask)
             for (const auto &path : loop->paths) paths.push_back(&path);
         Polylines polylines;
         for (const ExtrusionPath *path : paths) polylines.push_back(path->polyline.to_polyline());
+        const BoundingBox box = get_extents(polylines);
+        if (box.defined && !index.touches(box)) {
+            // Clipper drops paths without two distinct points, so such an entity
+            // has an empty difference and is kept, as is one inside the mask.
+            const bool drawn = std::any_of(polylines.begin(), polylines.end(), [](const Polyline &polyline) {
+                return std::any_of(polyline.points.begin(), polyline.points.end(),
+                                   [&](const Point &point) { return point != polyline.points.front(); });
+            });
+            const auto first = std::find_if(polylines.begin(), polylines.end(), [](const Polyline &polyline) { return !polyline.points.empty(); });
+            if (!drawn || index.contains(first->points.front())) clipped.push_back(entity);
+            else delete entity;
+            continue;
+        }
         if (diff_pl(polylines, mask).empty()) {
             clipped.push_back(entity);
             continue;
@@ -206,11 +275,12 @@ void clip_extrusions(PrintObject &object, const Job &job)
         if (!stack.has_clip_mask[k]) return;
         ExPolygons mask = stack.clip_masks[k];
         for (auto &polygon : mask) polygon.translate(-shift);
+        const MaskIndex index(std::move(mask));
         // Top-level entries stay: G-code expects one collection per island.
         for (LayerRegion *region : layer->regions())
             for (ExtrusionEntityCollection *collection : {&region->perimeters, &region->fills})
                 for (ExtrusionEntity *island : collection->entities)
-                    clip_entities(static_cast<ExtrusionEntityCollection*>(island)->entities, mask);
+                    clip_entities(static_cast<ExtrusionEntityCollection*>(island)->entities, index);
     });
 }
 

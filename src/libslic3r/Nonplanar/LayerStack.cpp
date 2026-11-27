@@ -3,8 +3,15 @@
 #include "../format.hpp"
 
 #include <nlohmann/json.hpp>
+#include <fast_float/fast_float.h>
 #include <boost/log/trivial.hpp>
 #include <algorithm>
+#include <charconv>
+#include <cstdint>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -17,6 +24,132 @@
 namespace Slic3r::Nonplanar {
 namespace {
 using Json = nlohmann::json;
+
+// Reads the subset of strict JSON that layer files use (ASCII strings without
+// escapes, RFC 8259 numbers, literals) into the same DOM as Json::parse, which
+// is several times slower on multi-megabyte layer stacks. Numbers follow the
+// nlohmann lexer: integers as uint64/int64 when they fit, otherwise and for
+// fractions/exponents a correctly rounded double, as strtod gives. Returns
+// false on anything else, and the caller lets Json::parse decide, so valid
+// input outside the subset still parses and invalid input fails the same way.
+class FastJson {
+public:
+    static bool parse(const std::string &text, Json &out)
+    {
+        FastJson reader(text);
+        reader.skip();
+        if (!reader.value(out)) return false;
+        reader.skip();
+        return reader.c == reader.end;
+    }
+private:
+    explicit FastJson(const std::string &text) : c(text.data()), end(text.data() + text.size()) {}
+    const char *c, *end;
+    void skip() { while (c != end && (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r')) ++c; }
+    bool literal(const char *word)
+    {
+        for (; *word; ++word, ++c) if (c == end || *c != *word) return false;
+        return true;
+    }
+    bool string(std::string &out)
+    {
+        const char *start = ++c;
+        while (c != end && *c != '"') {
+            const auto byte = static_cast<unsigned char>(*c);
+            if (byte < 0x20 || byte >= 0x80 || byte == '\\') return false;
+            ++c;
+        }
+        if (c == end) return false;
+        out.assign(start, c++);
+        return true;
+    }
+    bool number(Json &out)
+    {
+        const char *start = c;
+        if (c != end && *c == '-') ++c;
+        if (c == end || *c < '0' || *c > '9') return false;
+        if (*c == '0') ++c; else while (c != end && *c >= '0' && *c <= '9') ++c;
+        bool integer = true;
+        if (c != end && *c == '.') {
+            integer = false;
+            if (++c == end || *c < '0' || *c > '9') return false;
+            while (c != end && *c >= '0' && *c <= '9') ++c;
+        }
+        if (c != end && (*c == 'e' || *c == 'E')) {
+            integer = false;
+            if (++c != end && (*c == '+' || *c == '-')) ++c;
+            if (c == end || *c < '0' || *c > '9') return false;
+            while (c != end && *c >= '0' && *c <= '9') ++c;
+        }
+        if (integer) {
+            if (*start == '-') {
+                std::int64_t v;
+                const auto r = std::from_chars(start, c, v);
+                if (r.ec == std::errc() && r.ptr == c) { out = v; return true; }
+            } else {
+                std::uint64_t v;
+                const auto r = std::from_chars(start, c, v);
+                if (r.ec == std::errc() && r.ptr == c) { out = v; return true; }
+            }
+        }
+        double v;
+        const auto r = fast_float::from_chars(start, c, v);
+        if (r.ec != std::errc() || r.ptr != c || !std::isfinite(v)) return false;
+        out = v;
+        return true;
+    }
+    bool value(Json &out)
+    {
+        if (c == end) return false;
+        switch (*c) {
+        case '{': {
+            out = Json::object();
+            ++c; skip();
+            if (c != end && *c == '}') { ++c; return true; }
+            while (true) {
+                std::string key;
+                if (c == end || *c != '"' || !string(key)) return false;
+                skip();
+                if (c == end || *c != ':') return false;
+                ++c; skip();
+                Json item;
+                if (!value(item)) return false;
+                out[std::move(key)] = std::move(item);
+                skip();
+                if (c == end) return false;
+                if (*c == '}') { ++c; return true; }
+                if (*c != ',') return false;
+                ++c; skip();
+            }
+        }
+        case '[': {
+            out = Json::array();
+            ++c; skip();
+            if (c != end && *c == ']') { ++c; return true; }
+            while (true) {
+                Json item;
+                if (!value(item)) return false;
+                out.push_back(std::move(item));
+                skip();
+                if (c == end) return false;
+                if (*c == ']') { ++c; return true; }
+                if (*c != ',') return false;
+                ++c; skip();
+            }
+        }
+        case '"': {
+            std::string text;
+            if (!string(text)) return false;
+            out = std::move(text);
+            return true;
+        }
+        case 't': out = true; return literal("true");
+        case 'f': out = false; return literal("false");
+        case 'n': out = nullptr; return literal("null");
+        default: return number(out);
+        }
+    }
+};
 [[noreturn]] void invalid(const std::string &message)
 { throw std::invalid_argument(Slic3r::format(_u8L("Nonplanar layers: %1%"),message)); }
 
@@ -193,7 +326,8 @@ LayerStack LayerStack::parse(const std::string &text)
     const auto started = std::chrono::steady_clock::now();
     LayerStack out;
     try {
-        Json j = Json::parse(text);
+        Json j;
+        if (!FastJson::parse(text, j)) j = Json::parse(text);
         const bool interpolate = j.value("interpolate", true);
         if (j.at("format") != "orca_nonplanar_layers") invalid(_u8L("unknown format"));
         if (!j.at("version").is_number_integer() || (j.at("version") != 1 && j.at("version") != 2))
@@ -379,7 +513,13 @@ LayerStack LayerStack::read(const std::string &filename)
 {
     std::ifstream file(std::filesystem::u8path(filename), std::ios::binary);
     if (!file) invalid(Slic3r::format(_u8L("Cannot open %1%"),filename));
-    return parse(std::string(std::istreambuf_iterator<char>(file), {}));
+    // One bulk read: layer files reach 100+ MB, and istreambuf_iterator copies
+    // them a character at a time.
+    file.seekg(0, std::ios::end);
+    std::string text(size_t(file.tellg()), '\0');
+    file.seekg(0);
+    file.read(text.data(), std::streamsize(text.size()));
+    return parse(text);
 }
 
 bool LayerStack::covers(XY p) const
